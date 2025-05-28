@@ -5,7 +5,7 @@ Collects game results, team stats, and standings data.
 """
 
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Comment
 import pandas as pd
 import time
 import os
@@ -90,8 +90,8 @@ class NHLScraper:
             try:
                 # Extract game data
                 date_cell = cells[0]
-                visitor_cell = cells[1]
-                home_cell = cells[3]
+                visitor_cell = cells[2]
+                home_cell = cells[4]
                 
                 # Parse date
                 date_text = date_cell.text.strip()
@@ -115,8 +115,8 @@ class NHLScraper:
                 home_score = None
                 
                 if len(cells) > 4:
-                    visitor_score_cell = cells[2]
-                    home_score_cell = cells[4]
+                    visitor_score_cell = cells[3]
+                    home_score_cell = cells[5]
                     
                     try:
                         visitor_score = int(visitor_score_cell.text.strip())
@@ -131,7 +131,7 @@ class NHLScraper:
                 # Overtime/Shootout info
                 ot_so = ''
                 if len(cells) > 5:
-                    ot_cell = cells[5]
+                    ot_cell = cells[6]
                     ot_so = ot_cell.text.strip()
                 
                 game_data = {
@@ -177,13 +177,33 @@ class NHLScraper:
         stats_table = soup.find('table', {'id': 'stats'})
         if not stats_table:
             logger.error(f"No team stats table found for season {season}")
-            return pd.DataFrame()
+            logger.error(f"Trying to find in comments for season {season}")
+            
+            comments = soup.find_all(string=lambda text: isinstance(text, Comment))
+            
+            if not comments:
+                return pd.DataFrame()
+            
+            for comment in comments:
+                if 'id="stats"' in comment:
+                    # Parsing HTML from comments
+                    comment_soup = BeautifulSoup(comment, 'html.parser')
+                    stats_table_1 = comment_soup.find('table', {'id': 'stats'})
+                    
+                    if stats_table_1:
+                        stats_table = stats_table_1
+                        break
         
         stats_data = []
         
         # Parse header to get column names
-        header_row = stats_table.find('thead').find('tr')
-        headers = [th.text.strip() for th in header_row.find_all('th')]
+        header_rows = stats_table.find('thead').find_all('tr')
+        headers = []
+        for header_row in header_rows:
+            headers1 = [th.text.strip() for th in header_row.find_all('th')]
+            if len(headers1) < 6:
+                continue
+            headers = headers1            
         
         # Parse data rows
         rows = stats_table.find('tbody').find_all('tr')
@@ -233,8 +253,8 @@ class NHLScraper:
         standings_data = []
         
         # Find both conference tables
-        for conference in ['Eastern Conference', 'Western Conference']:
-            table_id = f"standings_{conference.split()[0].lower()}"
+        for conference in ['EAS', 'WES']:
+            table_id = f"standings_{conference.split()[0]}"
             table = soup.find('table', {'id': table_id})
             
             if not table:
