@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Database setup and data import for Hockey Prediction System
-Creates tables and imports scraped NHL data into PostgreSQL
+Database setup with better permission handling
 """
 
 import pandas as pd
@@ -30,19 +29,39 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class DatabaseManager:
-    """Manages database operations for hockey prediction system"""
+    """Manages database operations with better permission handling"""
     
     def __init__(self):
         self.database_url = os.getenv('DATABASE_URL')
         self.engine = create_engine(self.database_url)
         self.Session = sessionmaker(bind=self.engine)
         
+    def check_permissions(self):
+        """Check if we have necessary permissions"""
+        try:
+            with self.engine.connect() as conn:
+                # Try to create a test table
+                conn.execute(text("CREATE TABLE IF NOT EXISTS test_permissions (id SERIAL PRIMARY KEY)"))
+                conn.execute(text("DROP TABLE IF EXISTS test_permissions"))
+                conn.commit()
+                logger.info("✅ Database permissions OK")
+                return True
+        except Exception as e:
+            logger.error(f"❌ Permission check failed: {e}")
+            logger.error("💡 Please run the permission fix SQL commands as postgres user")
+            return False
+    
     def create_tables(self):
-        """Create all necessary tables"""
+        """Create all necessary tables with error handling"""
         
-        # SQL for creating tables
+        # Check permissions first
+        if not self.check_permissions():
+            logger.error("❌ Insufficient permissions. Please fix permissions first.")
+            return False
+        
+        # SQL for creating tables (same as before but with better error handling)
         create_tables_sql = """
-        -- Drop existing tables if they exist (for development)
+        -- Drop existing tables if they exist
         DROP TABLE IF EXISTS value_bets CASCADE;
         DROP TABLE IF EXISTS predictions CASCADE;
         DROP TABLE IF EXISTS odds CASCADE;
@@ -203,7 +222,7 @@ class DatabaseManager:
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         
-        -- Create indexes for better performance
+        -- Create indexes
         CREATE INDEX idx_games_date ON games(date);
         CREATE INDEX idx_games_season ON games(season);
         CREATE INDEX idx_games_teams ON games(home_team_id, away_team_id);
@@ -216,100 +235,117 @@ class DatabaseManager:
         
         try:
             with self.engine.connect() as conn:
-                # Execute the SQL
                 conn.execute(text(create_tables_sql))
                 conn.commit()
                 logger.info("✅ Database tables created successfully!")
+                return True
                 
         except Exception as e:
             logger.error(f"❌ Error creating tables: {e}")
-            raise
+            if "permission denied" in str(e).lower():
+                logger.error("💡 Permission issue detected. Please run these commands as postgres user:")
+                logger.error("   GRANT ALL ON SCHEMA public TO hockey_user;")
+                logger.error("   GRANT ALL ON ALL TABLES IN SCHEMA public TO hockey_user;")
+                logger.error("   GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO hockey_user;")
+            return False
     
     def insert_initial_data(self):
         """Insert initial leagues and teams data"""
         
-        # Insert NHL league
-        nhl_league_sql = """
-        INSERT INTO leagues (name, country, level, season_start, season_end)
-        VALUES ('NHL', 'North America', 1, 2023, 2024)
-        ON CONFLICT DO NOTHING;
-        """
-        
-        # NHL teams data
-        nhl_teams = [
-            # Eastern Conference - Atlantic Division
-            ('Boston Bruins', 'Boston', 'Eastern', 'Atlantic', 'BOS'),
-            ('Buffalo Sabres', 'Buffalo', 'Eastern', 'Atlantic', 'BUF'),
-            ('Detroit Red Wings', 'Detroit', 'Eastern', 'Atlantic', 'DET'),
-            ('Florida Panthers', 'Sunrise', 'Eastern', 'Atlantic', 'FLA'),
-            ('Montreal Canadiens', 'Montreal', 'Eastern', 'Atlantic', 'MTL'),
-            ('Ottawa Senators', 'Ottawa', 'Eastern', 'Atlantic', 'OTT'),
-            ('Tampa Bay Lightning', 'Tampa Bay', 'Eastern', 'Atlantic', 'TBL'),
-            ('Toronto Maple Leafs', 'Toronto', 'Eastern', 'Atlantic', 'TOR'),
-            
-            # Eastern Conference - Metropolitan Division
-            ('Carolina Hurricanes', 'Raleigh', 'Eastern', 'Metropolitan', 'CAR'),
-            ('Columbus Blue Jackets', 'Columbus', 'Eastern', 'Metropolitan', 'CBJ'),
-            ('New Jersey Devils', 'Newark', 'Eastern', 'Metropolitan', 'NJD'),
-            ('New York Islanders', 'Elmont', 'Eastern', 'Metropolitan', 'NYI'),
-            ('New York Rangers', 'New York', 'Eastern', 'Metropolitan', 'NYR'),
-            ('Philadelphia Flyers', 'Philadelphia', 'Eastern', 'Metropolitan', 'PHI'),
-            ('Pittsburgh Penguins', 'Pittsburgh', 'Eastern', 'Metropolitan', 'PIT'),
-            ('Washington Capitals', 'Washington', 'Eastern', 'Metropolitan', 'WSH'),
-            
-            # Western Conference - Central Division
-            ('Arizona Coyotes', 'Tempe', 'Western', 'Central', 'ARI'),
-            ('Chicago Blackhawks', 'Chicago', 'Western', 'Central', 'CHI'),
-            ('Colorado Avalanche', 'Denver', 'Western', 'Central', 'COL'),
-            ('Dallas Stars', 'Dallas', 'Western', 'Central', 'DAL'),
-            ('Minnesota Wild', 'Saint Paul', 'Western', 'Central', 'MIN'),
-            ('Nashville Predators', 'Nashville', 'Western', 'Central', 'NSH'),
-            ('St. Louis Blues', 'St. Louis', 'Western', 'Central', 'STL'),
-            ('Winnipeg Jets', 'Winnipeg', 'Western', 'Central', 'WPG'),
-            
-            # Western Conference - Pacific Division
-            ('Anaheim Ducks', 'Anaheim', 'Western', 'Pacific', 'ANA'),
-            ('Calgary Flames', 'Calgary', 'Western', 'Pacific', 'CGY'),
-            ('Edmonton Oilers', 'Edmonton', 'Western', 'Pacific', 'EDM'),
-            ('Los Angeles Kings', 'Los Angeles', 'Western', 'Pacific', 'LAK'),
-            ('San Jose Sharks', 'San Jose', 'Western', 'Pacific', 'SJS'),
-            ('Seattle Kraken', 'Seattle', 'Western', 'Pacific', 'SEA'),
-            ('Vancouver Canucks', 'Vancouver', 'Western', 'Pacific', 'VAN'),
-            ('Vegas Golden Knights', 'Las Vegas', 'Western', 'Pacific', 'VGK'),
-        ]
-        
         try:
+            # Insert NHL league
+            nhl_league_sql = """
+            INSERT INTO leagues (name, country, level, season_start, season_end)
+            VALUES ('NHL', 'North America', 1, 2023, 2024)
+            ON CONFLICT DO NOTHING
+            RETURNING id;
+            """
+            
+            # NHL teams data (same as before)
+            nhl_teams = [
+                # Eastern Conference - Atlantic Division
+                ('Boston Bruins', 'Boston', 'Eastern', 'Atlantic', 'BOS'),
+                ('Buffalo Sabres', 'Buffalo', 'Eastern', 'Atlantic', 'BUF'),
+                ('Detroit Red Wings', 'Detroit', 'Eastern', 'Atlantic', 'DET'),
+                ('Florida Panthers', 'Sunrise', 'Eastern', 'Atlantic', 'FLA'),
+                ('Montreal Canadiens', 'Montreal', 'Eastern', 'Atlantic', 'MTL'),
+                ('Ottawa Senators', 'Ottawa', 'Eastern', 'Atlantic', 'OTT'),
+                ('Tampa Bay Lightning', 'Tampa Bay', 'Eastern', 'Atlantic', 'TBL'),
+                ('Toronto Maple Leafs', 'Toronto', 'Eastern', 'Atlantic', 'TOR'),
+                
+                # Eastern Conference - Metropolitan Division
+                ('Carolina Hurricanes', 'Raleigh', 'Eastern', 'Metropolitan', 'CAR'),
+                ('Columbus Blue Jackets', 'Columbus', 'Eastern', 'Metropolitan', 'CBJ'),
+                ('New Jersey Devils', 'Newark', 'Eastern', 'Metropolitan', 'NJD'),
+                ('New York Islanders', 'Elmont', 'Eastern', 'Metropolitan', 'NYI'),
+                ('New York Rangers', 'New York', 'Eastern', 'Metropolitan', 'NYR'),
+                ('Philadelphia Flyers', 'Philadelphia', 'Eastern', 'Metropolitan', 'PHI'),
+                ('Pittsburgh Penguins', 'Pittsburgh', 'Eastern', 'Metropolitan', 'PIT'),
+                ('Washington Capitals', 'Washington', 'Eastern', 'Metropolitan', 'WSH'),
+                
+                # Western Conference - Central Division
+                ('Arizona Coyotes', 'Tempe', 'Western', 'Central', 'ARI'),
+                ('Chicago Blackhawks', 'Chicago', 'Western', 'Central', 'CHI'),
+                ('Colorado Avalanche', 'Denver', 'Western', 'Central', 'COL'),
+                ('Dallas Stars', 'Dallas', 'Western', 'Central', 'DAL'),
+                ('Minnesota Wild', 'Saint Paul', 'Western', 'Central', 'MIN'),
+                ('Nashville Predators', 'Nashville', 'Western', 'Central', 'NSH'),
+                ('St. Louis Blues', 'St. Louis', 'Western', 'Central', 'STL'),
+                ('Winnipeg Jets', 'Winnipeg', 'Western', 'Central', 'WPG'),
+                
+                # Western Conference - Pacific Division
+                ('Anaheim Ducks', 'Anaheim', 'Western', 'Pacific', 'ANA'),
+                ('Calgary Flames', 'Calgary', 'Western', 'Pacific', 'CGY'),
+                ('Edmonton Oilers', 'Edmonton', 'Western', 'Pacific', 'EDM'),
+                ('Los Angeles Kings', 'Los Angeles', 'Western', 'Pacific', 'LAK'),
+                ('San Jose Sharks', 'San Jose', 'Western', 'Pacific', 'SJS'),
+                ('Seattle Kraken', 'Seattle', 'Western', 'Pacific', 'SEA'),
+                ('Vancouver Canucks', 'Vancouver', 'Western', 'Pacific', 'VAN'),
+                ('Vegas Golden Knights', 'Las Vegas', 'Western', 'Pacific', 'VGK'),
+            ]
+            
             with self.engine.connect() as conn:
                 # Insert NHL league
-                conn.execute(text(nhl_league_sql))
+                result = conn.execute(text(nhl_league_sql))
+                league_row = result.fetchone()
                 
-                # Get NHL league ID
-                league_result = conn.execute(text("SELECT id FROM leagues WHERE name = 'NHL'"))
-                nhl_league_id = league_result.fetchone()[0]
+                if league_row:
+                    nhl_league_id = league_row[0]
+                else:
+                    # League already exists, get its ID
+                    result = conn.execute(text("SELECT id FROM leagues WHERE name = 'NHL'"))
+                    nhl_league_id = result.fetchone()[0]
                 
-                # Insert teams
+                # Insert teams with better error handling
+                teams_inserted = 0
                 for name, city, conference, division, abbrev in nhl_teams:
-                    team_sql = """
-                    INSERT INTO teams (name, city, league_id, conference, division, abbreviation)
-                    VALUES (:name, :city, :league_id, :conference, :division, :abbreviation)
-                    ON CONFLICT DO NOTHING;
-                    """
-                    conn.execute(text(team_sql), {
-                        'name': name,
-                        'city': city,
-                        'league_id': nhl_league_id,
-                        'conference': conference,
-                        'division': division,
-                        'abbreviation': abbrev
-                    })
+                    try:
+                        team_sql = """
+                        INSERT INTO teams (name, city, league_id, conference, division, abbreviation)
+                        VALUES (:name, :city, :league_id, :conference, :division, :abbreviation)
+                        ON CONFLICT DO NOTHING;
+                        """
+                        conn.execute(text(team_sql), {
+                            'name': name,
+                            'city': city,
+                            'league_id': nhl_league_id,
+                            'conference': conference,
+                            'division': division,
+                            'abbreviation': abbrev
+                        })
+                        teams_inserted += 1
+                    except Exception as e:
+                        logger.warning(f"Failed to insert team {name}: {e}")
                 
                 conn.commit()
-                logger.info(f"✅ Inserted NHL league and {len(nhl_teams)} teams")
+                logger.info(f"✅ Inserted NHL league and {teams_inserted} teams")
+                return True
                 
         except Exception as e:
             logger.error(f"❌ Error inserting initial data: {e}")
-            raise
+            return False
     
+    # Rest of the methods remain the same...
     def import_scraped_data(self, data_directory: str = "data/raw"):
         """Import scraped CSV data into database"""
         
@@ -318,117 +354,144 @@ class DatabaseManager:
             csv_files = glob.glob(f"{data_directory}/nhl_*.csv")
             if not csv_files:
                 logger.warning("No CSV files found to import")
-                return
+                return False
             
             # Get the latest timestamp
-            latest_timestamp = max([f.split('_')[-1].replace('.csv', '') for f in csv_files if 'summary' not in f])
+            latest_files = [f for f in csv_files if 'summary' not in f]
+            if not latest_files:
+                logger.warning("No data CSV files found")
+                return False
+                
+            latest_timestamp = max([f.split('_')[-1].replace('.csv', '') for f in latest_files])
             
             # Import games data
             games_file = f"{data_directory}/nhl_games_{latest_timestamp}.csv"
             if os.path.exists(games_file):
                 self._import_games(games_file)
             
-            # Import team stats data
+            # Import team stats data  
             stats_file = f"{data_directory}/nhl_team_stats_{latest_timestamp}.csv"
             if os.path.exists(stats_file):
                 self._import_team_stats(stats_file)
-            
-            # Import standings data
-            standings_file = f"{data_directory}/nhl_standings_{latest_timestamp}.csv"
-            if os.path.exists(standings_file):
-                self._import_standings(standings_file)
                 
             logger.info("✅ Data import completed successfully!")
+            return True
             
         except Exception as e:
             logger.error(f"❌ Error importing data: {e}")
-            raise
+            return False
     
     def _import_games(self, filename: str):
-        """Import games data from CSV"""
+        """Import games data from CSV with better error handling"""
         
-        df = pd.read_csv(filename)
-        logger.info(f"Importing {len(df)} games from {filename}")
-        
-        # Get team name to ID mapping
-        team_mapping = self._get_team_mapping()
-        
-        # Prepare data for insertion
-        games_data = []
-        for _, row in df.iterrows():
-            home_team_id = team_mapping.get(row['home_team'])
-            away_team_id = team_mapping.get(row['visitor_team'])
+        try:
+            df = pd.read_csv(filename)
+            logger.info(f"Importing {len(df)} games from {filename}")
             
-            if home_team_id and away_team_id:
-                games_data.append({
-                    'date': row['date'],
-                    'season': row['season'],
-                    'league_id': 1,  # NHL
-                    'home_team_id': home_team_id,
-                    'away_team_id': away_team_id,
-                    'home_score': row['home_score'] if pd.notna(row['home_score']) else None,
-                    'away_score': row['visitor_score'] if pd.notna(row['visitor_score']) else None,
-                    'overtime_shootout': row['overtime_shootout'] if pd.notna(row['overtime_shootout']) else '',
-                    'status': row['status'],
-                    'scraped_at': row['scraped_at']
-                })
-        
-        # Insert data
-        if games_data:
-            games_df = pd.DataFrame(games_data)
-            games_df.to_sql('games', self.engine, if_exists='append', index=False)
-            logger.info(f"✅ Imported {len(games_data)} games")
+            # Get team name to ID mapping
+            team_mapping = self._get_team_mapping()
+            
+            if not team_mapping:
+                logger.error("No teams found in database. Please ensure teams are inserted first.")
+                return
+            
+            # Prepare data for insertion
+            games_data = []
+            skipped = 0
+            
+            for _, row in df.iterrows():
+                home_team_id = team_mapping.get(row['home_team'])
+                away_team_id = team_mapping.get(row['visitor_team'])
+                
+                if home_team_id and away_team_id:
+                    games_data.append({
+                        'date': row['date'],
+                        'season': row['season'],
+                        'league_id': 1,  # NHL
+                        'home_team_id': home_team_id,
+                        'away_team_id': away_team_id,
+                        'home_score': row['home_score'] if pd.notna(row['home_score']) else None,
+                        'away_score': row['visitor_score'] if pd.notna(row['visitor_score']) else None,
+                        'overtime_shootout': row.get('overtime_shootout', '') if pd.notna(row.get('overtime_shootout', '')) else '',
+                        'status': row['status'],
+                        'scraped_at': row['scraped_at']
+                    })
+                else:
+                    skipped += 1
+                    if skipped <= 5:  # Log first few skipped entries
+                        logger.warning(f"Skipped game: {row['visitor_team']} vs {row['home_team']} (teams not found)")
+            
+            # Insert data
+            if games_data:
+                games_df = pd.DataFrame(games_data)
+                games_df.to_sql('games', self.engine, if_exists='append', index=False)
+                logger.info(f"✅ Imported {len(games_data)} games (skipped {skipped})")
+            else:
+                logger.warning("No games data to import")
+                
+        except Exception as e:
+            logger.error(f"❌ Error importing games: {e}")
     
     def _import_team_stats(self, filename: str):
-        """Import team stats data from CSV"""
+        """Import team stats data from CSV with better error handling"""
         
-        if not os.path.exists(filename):
-            logger.warning(f"Team stats file not found: {filename}")
-            return
+        try:
+            if not os.path.exists(filename):
+                logger.warning(f"Team stats file not found: {filename}")
+                return
+                
+            df = pd.read_csv(filename)
+            logger.info(f"Importing {len(df)} team stats from {filename}")
             
-        df = pd.read_csv(filename)
-        logger.info(f"Importing {len(df)} team stats from {filename}")
-        
-        # Get team name to ID mapping
-        team_mapping = self._get_team_mapping()
-        
-        # Prepare data for insertion
-        stats_data = []
-        for _, row in df.iterrows():
-            team_id = team_mapping.get(row.get('Team', ''))
+            # Get team name to ID mapping
+            team_mapping = self._get_team_mapping()
             
-            if team_id:
-                stats_data.append({
-                    'team_id': team_id,
-                    'season': row['season'],
-                    'games_played': self._safe_int(row.get('GP')),
-                    'wins': self._safe_int(row.get('W')),
-                    'losses': self._safe_int(row.get('L')),
-                    'overtime_losses': self._safe_int(row.get('OL')),
-                    'points': self._safe_int(row.get('PTS')),
-                    'goals_for': self._safe_int(row.get('GF')),
-                    'goals_against': self._safe_int(row.get('GA')),
-                    'scraped_at': row['scraped_at']
-                })
-        
-        # Insert data
-        if stats_data:
-            stats_df = pd.DataFrame(stats_data)
-            stats_df.to_sql('team_stats', self.engine, if_exists='append', index=False)
-            logger.info(f"✅ Imported {len(stats_data)} team stats")
-    
-    def _import_standings(self, filename: str):
-        """Import standings data (similar to team stats)"""
-        # For now, standings are similar to team stats
-        # You can extend this if you want separate standings processing
-        pass
+            # Prepare data for insertion
+            stats_data = []
+            skipped = 0
+            
+            for _, row in df.iterrows():
+                team_id = team_mapping.get(row.get('Team', ''))
+                
+                if team_id:
+                    stats_data.append({
+                        'team_id': team_id,
+                        'season': row['season'],
+                        'games_played': self._safe_int(row.get('GP')),
+                        'wins': self._safe_int(row.get('W')),
+                        'losses': self._safe_int(row.get('L')),
+                        'overtime_losses': self._safe_int(row.get('OL')),
+                        'points': self._safe_int(row.get('PTS')),
+                        'goals_for': self._safe_int(row.get('GF')),
+                        'goals_against': self._safe_int(row.get('GA')),
+                        'scraped_at': row['scraped_at']
+                    })
+                else:
+                    skipped += 1
+                    if skipped <= 5:
+                        logger.warning(f"Skipped team stats: {row.get('Team', 'Unknown')} (team not found)")
+            
+            # Insert data
+            if stats_data:
+                stats_df = pd.DataFrame(stats_data)
+                stats_df.to_sql('team_stats', self.engine, if_exists='append', index=False)
+                logger.info(f"✅ Imported {len(stats_data)} team stats (skipped {skipped})")
+            else:
+                logger.warning("No team stats data to import")
+                
+        except Exception as e:
+            logger.error(f"❌ Error importing team stats: {e}")
     
     def _get_team_mapping(self) -> Dict[str, int]:
         """Get mapping from team names to team IDs"""
         
-        with self.engine.connect() as conn:
-            result = conn.execute(text("SELECT id, name FROM teams"))
-            return {row[1]: row[0] for row in result.fetchall()}
+        try:
+            with self.engine.connect() as conn:
+                result = conn.execute(text("SELECT id, name FROM teams"))
+                return {row[1]: row[0] for row in result.fetchall()}
+        except Exception as e:
+            logger.error(f"❌ Error getting team mapping: {e}")
+            return {}
     
     def _safe_int(self, value) -> Optional[int]:
         """Safely convert value to int"""
@@ -438,45 +501,49 @@ class DatabaseManager:
             return None
     
     def get_data_summary(self):
-        """Get summary of imported data"""
+        """Get summary of imported data with error handling"""
         
-        with self.engine.connect() as conn:
-            # Games summary
-            games_result = conn.execute(text("""
-                SELECT 
-                    season,
-                    COUNT(*) as total_games,
-                    COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed_games,
-                    MIN(date) as first_game,
-                    MAX(date) as last_game
-                FROM games 
-                GROUP BY season 
-                ORDER BY season
-            """))
-            
-            logger.info("\n📊 GAMES SUMMARY:")
-            for row in games_result:
-                logger.info(f"  Season {row[0]}: {row[1]} total games, {row[2]} completed ({row[3]} to {row[4]})")
-            
-            # Teams summary
-            teams_result = conn.execute(text("SELECT COUNT(*) FROM teams"))
-            teams_count = teams_result.fetchone()[0]
-            logger.info(f"\n🏒 TEAMS: {teams_count} teams imported")
-            
-            # Team stats summary
-            stats_result = conn.execute(text("""
-                SELECT season, COUNT(*) as teams_with_stats
-                FROM team_stats 
-                GROUP BY season 
-                ORDER BY season
-            """))
-            
-            logger.info("\n📈 TEAM STATS SUMMARY:")
-            for row in stats_result:
-                logger.info(f"  Season {row[0]}: {row[1]} teams with stats")
+        try:
+            with self.engine.connect() as conn:
+                # Games summary
+                games_result = conn.execute(text("""
+                    SELECT 
+                        season,
+                        COUNT(*) as total_games,
+                        COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed_games,
+                        MIN(date) as first_game,
+                        MAX(date) as last_game
+                    FROM games 
+                    GROUP BY season 
+                    ORDER BY season
+                """))
+                
+                logger.info("\n📊 GAMES SUMMARY:")
+                for row in games_result:
+                    logger.info(f"  Season {row[0]}: {row[1]} total games, {row[2]} completed ({row[3]} to {row[4]})")
+                
+                # Teams summary
+                teams_result = conn.execute(text("SELECT COUNT(*) FROM teams"))
+                teams_count = teams_result.fetchone()[0]
+                logger.info(f"\n🏒 TEAMS: {teams_count} teams imported")
+                
+                # Team stats summary
+                stats_result = conn.execute(text("""
+                    SELECT season, COUNT(*) as teams_with_stats
+                    FROM team_stats 
+                    GROUP BY season 
+                    ORDER BY season
+                """))
+                
+                logger.info("\n📈 TEAM STATS SUMMARY:")
+                for row in stats_result:
+                    logger.info(f"  Season {row[0]}: {row[1]} teams with stats")
+                    
+        except Exception as e:
+            logger.error(f"❌ Error generating summary: {e}")
 
 def main():
-    """Main function to setup database and import data"""
+    """Main function with better error handling"""
     
     # Create logs directory
     os.makedirs('logs', exist_ok=True)
@@ -489,15 +556,21 @@ def main():
         
         # Create tables
         logger.info("Creating database tables...")
-        db_manager.create_tables()
+        if not db_manager.create_tables():
+            logger.error("❌ Failed to create tables. Please check permissions.")
+            return
         
         # Insert initial data
         logger.info("Inserting initial leagues and teams...")
-        db_manager.insert_initial_data()
+        if not db_manager.insert_initial_data():
+            logger.error("❌ Failed to insert initial data.")
+            return
         
         # Import scraped data
-        logger.info("Importing scraped NHL data...")
-        db_manager.import_scraped_data()
+        logger.info("Importing scraped NHL data...")  
+        if not db_manager.import_scraped_data():
+            logger.error("❌ Failed to import scraped data.")
+            return
         
         # Display summary
         logger.info("Generating data summary...")
