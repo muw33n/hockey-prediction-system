@@ -157,7 +157,7 @@ class EloRatingSystem:
         Returns:
             DataFrame with game results
         """
-        query = """
+        query = f"""
         SELECT 
             g.id,
             g.date,
@@ -173,14 +173,13 @@ class EloRatingSystem:
         JOIN teams ht ON g.home_team_id = ht.id
         JOIN teams at ON g.away_team_id = at.id
         WHERE g.status = 'completed'
-            AND g.season >= :season_start
+            AND g.season >= '{season_start}'
             AND g.home_score IS NOT NULL 
             AND g.away_score IS NOT NULL
         ORDER BY g.date, g.id
         """
         
-        with self.engine.connect() as conn:
-            df = pd.read_sql(query, conn, params={'season_start': season_start})
+        df = pd.read_sql(query, self.engine)
         
         logger.info(f"Loaded {len(df)} completed games from season {season_start} onwards")
         return df
@@ -330,7 +329,7 @@ class EloRatingSystem:
         Returns:
             List of prediction dictionaries
         """
-        query = """
+        query = f"""
         SELECT 
             g.id,
             g.date,
@@ -342,12 +341,11 @@ class EloRatingSystem:
         JOIN teams ht ON g.home_team_id = ht.id
         JOIN teams at ON g.away_team_id = at.id
         WHERE g.status = 'scheduled'
-            AND g.date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '%s days'
+            AND g.date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '{days_ahead} days'
         ORDER BY g.date
-        """ % days_ahead
+        """
         
-        with self.engine.connect() as conn:
-            upcoming_games = pd.read_sql(query, conn)
+        upcoming_games = pd.read_sql(query, self.engine)
         
         predictions = []
         for _, game in upcoming_games.iterrows():
@@ -386,12 +384,15 @@ class EloRatingSystem:
         if not team_ids:
             return {}
         
-        placeholders = ','.join(['%s'] * len(team_ids))
-        query = f"SELECT id, name FROM teams WHERE id IN ({placeholders})"
+        # Handle single item case for SQL IN clause
+        if len(team_ids) == 1:
+            query = f"SELECT id, name FROM teams WHERE id = {team_ids[0]}"
+        else:
+            team_ids_str = ','.join(map(str, team_ids))
+            query = f"SELECT id, name FROM teams WHERE id IN ({team_ids_str})"
         
-        with self.engine.connect() as conn:
-            result = conn.execute(text(query), team_ids)
-            return {row[0]: row[1] for row in result.fetchall()}
+        df = pd.read_sql(query, self.engine)
+        return dict(zip(df['id'], df['name']))
     
     def _calculate_metrics(self, predictions: List[float], actuals: List[int]) -> Dict:
         """Calculate prediction metrics"""
