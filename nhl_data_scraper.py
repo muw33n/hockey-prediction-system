@@ -357,8 +357,8 @@ def main():
     if datetime.now().month >= 9:  # New season starts in September
         current_year += 1
     
-    start_season = current_year - 2
-    end_season = current_year
+    start_season = current_year - 3
+    end_season = current_year - 1 
     
     logger.info(f"Starting NHL data scraping for seasons {start_season-1}-{start_season-1+1} to {end_season-1}-{str(end_season)[2:]}")
     
