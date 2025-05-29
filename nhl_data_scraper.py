@@ -366,7 +366,7 @@ def main():
     data = scraper.scrape_multiple_seasons(start_season, end_season)
     
     # Save to CSV files
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
     
     for data_type, df in data.items():
         filename = f"data/raw/nhl_{data_type}_{timestamp}.csv"
