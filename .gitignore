@@ -44,6 +44,9 @@ env/
 data/raw/*.csv
 data/raw/*.json
 data/raw/*.xlsx
+data/odds/*.csv
+data/odds/*.json
+data/odds/*.xlsx
 *.sqlite3
 
 # Logs
