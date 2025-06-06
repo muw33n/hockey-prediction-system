@@ -201,14 +201,49 @@ class BetExplorerScraper:
             Seznam URL jednotlivých zápasů
         """
         # Convert season to betexplorer format
-        season_formatted = season.replace('-', '-20') if len(season.split('-')[0]) == 4 else season
-        season_url = f"{self.base_url}/hockey/usa/nhl-{season_formatted}/results/"
+        #season_formatted = season.replace('-', '-20') if len(season.split('-')[0]) == 4 else season
+        season_url = f"{self.base_url}/hockey/usa/nhl-{season}/results/"
         
         logger.info(f"Načítám výsledky pro sezónu {season}")
         
         soup = self._make_request(season_url)
         if not soup:
             logger.error(f"Nepodařilo se načíst výsledky pro sezónu {season}")
+            return []
+
+        # Najdi element s title="Main season game statistics" a získej stage URL
+        stage_element = soup.find(attrs={'title': 'Main season game statistics'})
+        if not stage_element:
+            logger.error("Nenalezen element s title='Main season game statistics'")
+            return []
+        
+        # Získej href z elementu (může být buď přímo href nebo v parent elementu)
+        stage_href = None
+        if stage_element.name == 'a' and stage_element.get('href'):
+            stage_href = stage_element['href']
+        else:
+            # Hledej parent element, který je link
+            parent = stage_element.find_parent('a')
+            if parent and parent.get('href'):
+                stage_href = parent['href']
+        
+        if not stage_href:
+            logger.error("Nenalezen href pro Main season game statistics")
+            return []
+        
+        # Vytvoř novou URL s &month=all
+        stage_url = urljoin(season_url, stage_href)
+        if '?' in stage_url:
+            results_url = f"{stage_url}&month=all"
+        else:
+            results_url = f"{stage_url}?month=all"
+        
+        logger.info(f"Používám stage URL: {results_url}")
+        
+        # Načti stránku s kompletními výsledky
+        soup = self._make_request(results_url)
+        if not soup:
+            logger.error(f"Nepodařilo se načíst kompletní výsledky pro sezónu {season}")
             return []
         
         match_urls = []
@@ -258,7 +293,7 @@ class BetExplorerScraper:
                 return None
             
             # Extract odds
-            odds_data = self._extract_odds_from_page(soup)
+            odds_data = self._extract_odds_from_page(soup, match_url)
             
             # Combine information
             result = {
@@ -277,109 +312,359 @@ class BetExplorerScraper:
     def _extract_match_info(self, soup: BeautifulSoup, match_url: str) -> Optional[Dict]:
         """Extrahuje základní informace o zápase"""
         try:
-            # Extract teams from the page
-            title = soup.find('h1')
-            if not title:
-                logger.error("Nenalezen titulek stránky")
+            # Extrahuj týmy z list-details struktury
+            team_elements = soup.find_all('h2', {'class': 'list-details__item__title'})
+            
+            if len(team_elements) < 2:
+                logger.error("Nenalezeny týmy na stránce")
                 return None
             
-            title_text = title.get_text(strip=True)
+            # První tým je domácí, druhý je hostující (podle pořadí v HTML)
+            home_team = team_elements[0].get_text(strip=True)
+            away_team = team_elements[1].get_text(strip=True)
             
-            # Parse team names (format: "Team A - Team B")
-            if ' - ' in title_text:
-                teams = title_text.split(' - ')
-                if len(teams) >= 2:
-                    away_team = teams[0].strip()
-                    home_team = teams[1].strip()
-                else:
-                    logger.error(f"Neočekávaný formát titulku: {title_text}")
-                    return None
-            else:
-                logger.error(f"Neočekávaný formát titulku: {title_text}")
-                return None
-            
-            # Map team names
-            away_team = self.team_mapping.get(away_team, away_team)
+            # Mapuj názvy týmů
             home_team = self.team_mapping.get(home_team, home_team)
+            away_team = self.team_mapping.get(away_team, away_team)
             
-            # Extract the date and result
-            date_elem = soup.find('p', {'class': 'list-details'})
+            # Extrahuj datum z data-dt atributu
             match_date = None
+            date_elem = soup.find(attrs={'data-dt': True})
             if date_elem:
-                date_text = date_elem.get_text(strip=True)
-                # Parse date (various formats)
-                match_date = self._parse_date(date_text)
+                date_string = date_elem.get('data-dt')
+                # Format: "31,10,2021,21,00"
+                date_parts = date_string.split(',')
+                if len(date_parts) >= 3:
+                    try:
+                        day = int(date_parts[0])
+                        month = int(date_parts[1])
+                        year = int(date_parts[2])
+                        match_date = date(year, month, day)
+                    except (ValueError, IndexError):
+                        logger.warning(f"Nepodařilo se parsovat datum: {date_string}")
             
-            # Extract the result
-            score_elem = soup.find('p', {'class': 'result'})
+            # Extrahuj výsledek z js-score elementu
             home_score, away_score = None, None
+            score_elem = soup.find(id='js-score')
             if score_elem:
                 score_text = score_elem.get_text(strip=True)
-                scores = self._parse_score(score_text)
-                if scores:
-                    home_score, away_score = scores
+                if score_text and ':' in score_text:
+                    try:
+                        scores = score_text.split(':')
+                        if len(scores) == 2:
+                            home_score = int(scores[0].strip())
+                            away_score = int(scores[1].strip())
+                    except ValueError:
+                        logger.warning(f"Nepodařilo se parsovat skóre: {score_text}")
             
-            return {
+            # Určení statusu zápasu
+            status = 'scheduled'  # Výchozí hodnota
+            
+            # Zkontroluj isFinished hodnotu
+            finished_elem = soup.find(id='isFinished')
+            if finished_elem:
+                finished_value = finished_elem.get('value', '0')
+                if finished_value == '1':
+                    status = 'completed'
+            
+            # Zkontroluj isLive hodnotu
+            live_elem = soup.find(id='isLive')
+            if live_elem:
+                live_value = live_elem.get('value', '')
+                if live_value and live_value != '':
+                    status = 'live'
+            
+            # Pokud máme skóre ale status není completed, pravděpodobně je zápas dokončen
+            if home_score is not None and away_score is not None and status == 'scheduled':
+                status = 'completed'
+            
+            # Extrahuj podrobnosti skóre (periody) pokud existují
+            partial_score = None
+            partial_elem = soup.find(id='js-partial')
+            if partial_elem:
+                partial_score = partial_elem.get_text(strip=True)
+            
+            result = {
                 'home_team': home_team,
                 'away_team': away_team,
                 'match_date': match_date,
                 'home_score': home_score,
                 'away_score': away_score,
-                'status': 'completed' if home_score is not None else 'scheduled'
+                'status': status
             }
+            
+            # Přidej podrobnosti skóre pokud existují
+            if partial_score:
+                result['partial_score'] = partial_score
+            
+            logger.debug(f"Extrahované informace: {result}")
+            return result
             
         except Exception as e:
             logger.error(f"Chyba při extrakci informací o zápase: {e}")
             return None
-    
-    def _extract_odds_from_page(self, soup: BeautifulSoup) -> List[Dict]:
-        """Extrahuje kurzy ze stránky zápasu"""
+
+    def _extract_odds_from_page(self, soup: BeautifulSoup, match_url: str) -> List[Dict]:
+        """
+        Extrahuje kurzy ze stránky zápasu pomocí API
+        
+        Args:
+            soup: BeautifulSoup objekt stránky (pro fallback)
+            match_url: URL zápasu pro extrakci ID
+        
+        Returns:
+            Seznam slovníků s kurzy
+        """
         odds_data = []
         
         try:
-            # Search odds tables
-            odds_tables = soup.find_all('table', {'class': 'table-main'})
+            # Extrahuj match ID z URL
+            match_id = self._extract_match_id_from_url(match_url)
+            if not match_id:
+                logger.error(f"Nepodařilo se extrahovat match ID z URL: {match_url}")
+                return []
             
-            for table in odds_tables:
-                # Find the table header
-                header = table.find('thead')
-                if not header:
+            logger.debug(f"Extrahován match ID: {match_id}")
+            
+            # Získej kurzy pro různé typy trhů
+            market_types = [
+                ('HA', 'moneyline_2way'),  # Domácí/Hosté (2-way)
+                ('1x2', '1x2')            # 1X2 (3-way) - pro úplnost
+            ]
+            
+            for market_code, market_name in market_types:
+                try:
+                    market_odds = self._fetch_match_odds(match_id, market_code, market_name)
+                    if market_odds:
+                        odds_data.extend(market_odds)
+                except Exception as e:
+                    logger.warning(f"Chyba při načítání kurzů pro trh {market_name}: {e}")
                     continue
-                
-                # Extract columns
-                header_row = header.find('tr')
-                if not header_row:
-                    continue
-                
-                columns = [th.get_text(strip=True) for th in header_row.find_all('th')]
-                
-                # Process rows with data
-                tbody = table.find('tbody')
-                if not tbody:
-                    continue
-                
-                for row in tbody.find_all('tr'):
-                    cells = row.find_all('td')
-                    if len(cells) < len(columns):
-                        continue
-                    
-                    # Extract data from a row
-                    row_data = {}
-                    for i, cell in enumerate(cells):
-                        if i < len(columns):
-                            cell_text = cell.get_text(strip=True)
-                            row_data[columns[i]] = cell_text
-                    
-                    # If the row contains odds, add it
-                    if self._is_odds_row(row_data):
-                        odds_entry = self._process_odds_row(row_data)
-                        if odds_entry:
-                            odds_data.append(odds_entry)
+            
+            logger.info(f"Extrahováno {len(odds_data)} kurzů pro zápas {match_id}")
             
         except Exception as e:
             logger.error(f"Chyba při extrakci kurzů: {e}")
         
         return odds_data
+    
+    def _extract_match_id_from_url(self, match_url: str) -> Optional[str]:
+        """
+        Extrahuje ID zápasu z URL
+        
+        Args:
+            match_url: URL zápasu (např. https://www.betexplorer.com/hockey/usa/nhl/buffalo-sabres-philadelphia-flyers/z1sKAia5/)
+        
+        Returns:
+            8-znakové ID zápasu nebo None
+        """
+        try:
+            # URL formát: .../team1-team2/MATCH_ID/
+            # Nebo: .../team1-team2/MATCH_ID/odds/
+            
+            # Rozděl URL podle '/'
+            url_parts = match_url.rstrip('/').split('/')
+            
+            # Hledej 8-znakový identifikátor
+            for part in reversed(url_parts):  # Začni od konce
+                if len(part) == 8 and part.isalnum():
+                    return part
+            
+            # Fallback: regex pro 8 znaků
+            import re
+            match_id_pattern = r'/([a-zA-Z0-9]{8})/?(?:odds/?)?'
+            match = re.search(match_id_pattern, match_url)
+            if match:
+                return match.group(1)
+            
+            logger.error(f"Match ID nenalezeno v URL: {match_url}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Chyba při extrakci match ID: {e}")
+            return None
+
+    def _fetch_match_odds(self, match_id: str, market_code: str, market_name: str) -> List[Dict]:
+        """Načte kurzy pro konkrétní zápas a trh"""
+        try:
+            # Sestav API URL
+            odds_url = f"{self.base_url}/match-odds-old/{match_id}/1/{market_code}/1/en/"
+            
+            logger.debug(f"Načítám kurzy z: {odds_url}")
+            
+            # Proveď API požadavek
+            response = self.session.get(odds_url, timeout=30)
+            response.raise_for_status()
+            
+            # Parsuj JSON odpověď
+            try:
+                data = response.json()
+            except ValueError as e:
+                logger.error(f"Neplatná JSON odpověď z {odds_url}: {e}")
+                return []
+            
+            # Zpracuj kurzy z odpovědi
+            if 'odds' not in data:
+                logger.warning(f"Klíč 'odds' nenalezen v odpovědi pro {market_name}")
+                return []
+            
+            return self._parse_odds_response(data, market_name)
+            
+        except Exception as e:
+            logger.error(f"Chyba při načítání kurzů pro {market_name}: {e}")
+            return []
+        
+    def _parse_odds_response(self, response_data: Dict, market_name: str) -> List[Dict]:
+        """Parsuje JSON odpověď s kurzy (obsahuje HTML fragment)"""
+        odds_list = []
+        
+        try:
+            # Získej HTML fragment z klíče "odds"
+            html_content = response_data.get('odds', '')
+            if not html_content:
+                logger.warning(f"Prázdný HTML fragment pro {market_name}")
+                return []
+            
+            # Parsuj HTML fragment
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # Najdi tabulku s kurzy
+            odds_table = soup.find('table', class_='table-main')
+            if not odds_table:
+                logger.warning(f"Tabulka s kurzy nenalezena pro {market_name}")
+                return []
+            
+            # Získej header pro identifikaci sloupců
+            header_row = odds_table.find('thead')
+            if header_row:
+                header_cells = header_row.find_all('th')
+                logger.debug(f"Header sloupce: {[th.get_text(strip=True) for th in header_cells]}")
+            
+            # Parsuj řádky s kurzy
+            tbody = odds_table.find('tbody')
+            if not tbody:
+                logger.warning(f"Tělo tabulky nenalezeno pro {market_name}")
+                return []
+            
+            for row in tbody.find_all('tr'):
+                try:
+                    # Extrahuj název bookmaker
+                    bookmaker_cell = row.find('a', class_='in-bookmaker-logo-link')
+                    if not bookmaker_cell:
+                        continue
+
+                    bookmaker_name = bookmaker_cell.get_text(strip=True)
+                    
+                    # Najdi buňky s kurzy (mají data-odd atribut)
+                    odds_cells = row.find_all('td', attrs={'data-odd': True})
+                    
+                    if len(odds_cells) < 2:
+                        logger.debug(f"Nedostatek kurzů pro {bookmaker_name}")
+                        continue
+                    
+                    # Extrahuj kurzy a další metadata
+                    home_cell = odds_cells[0]  # První kurz = domácí
+                    away_cell = odds_cells[1]  # Druhý kurz = hosté
+                    
+                    home_odds = float(home_cell.get('data-odd'))
+                    away_odds = float(away_cell.get('data-odd'))
+                    
+                    # Extrahuj datum posledního updatu
+                    home_created = home_cell.get('data-created', '')
+                    away_created = away_cell.get('data-created', '')
+                    
+                    # Extrahuj opening odds
+                    home_opening = home_cell.get('data-opening-odd')
+                    away_opening = away_cell.get('data-opening-odd')
+                    opening_date = home_cell.get('data-opening-date', '')
+                    
+                    # Sestavení záznamu
+                    odds_entry = {
+                        'bookmaker': bookmaker_name,
+                        'market_type': market_name,
+                        'odds': {
+                            'home': home_odds,
+                            'away': away_odds
+                        },
+                        'timestamp': datetime.now(),
+                        'last_updated': self._parse_betexplorer_datetime(home_created),
+                        'metadata': {
+                            'home_opening_odds': float(home_opening) if home_opening else None,
+                            'away_opening_odds': float(away_opening) if away_opening else None,
+                            'opening_date': self._parse_betexplorer_datetime(opening_date),
+                            'bookmaker_id': home_cell.get('data-bookie-id'),
+                            'bet_url': home_cell.get('data-bet-url')
+                        }
+                    }
+                    
+                    odds_list.append(odds_entry)
+                    logger.debug(f"Parsován kurz: {bookmaker_name} - Domácí: {home_odds}, Hosté: {away_odds}")
+                    
+                except Exception as e:
+                    logger.warning(f"Chyba při parsování řádku kurzů: {e}")
+                    continue
+
+            # Pokus o extrakci průměrných kurzů
+            tfoot = odds_table.find('tfoot')
+            if tfoot:
+                avg_cells = tfoot.find_all('td', attrs={'data-odd': True})
+                if len(avg_cells) >= 2:
+                    try:
+                        avg_home = float(avg_cells[0].get('data-odd'))
+                        avg_away = float(avg_cells[1].get('data-odd'))
+
+                        odds_entry = {
+                            'bookmaker': 'Average',
+                            'market_type': market_name,
+                            'odds': {
+                                'home': avg_home,
+                                'away': avg_away
+                            },
+                            'timestamp': datetime.now(),
+                            'metadata': {
+                                'is_average': True
+                            }
+                        }
+                        odds_list.append(odds_entry)
+                        logger.debug(f"Parsován průměr: Domácí: {avg_home}, Hosté: {avg_away}")
+                        
+                    except Exception as e:
+                        logger.warning(f"Chyba při parsování průměrných kurzů: {e}")
+            
+            logger.info(f"Parsováno {len(odds_list)} kurzů pro {market_name}")
+            
+        except Exception as e:
+            logger.error(f"Chyba při parsování kurzů: {e}")
+        
+        return odds_list
+ 
+    def _parse_betexplorer_datetime(self, datetime_str: str) -> Optional[datetime]:
+        """Parsuje datum/čas z betexplorer formátu"""
+        if not datetime_str:
+            return None
+        
+        try:
+            # Format: "18,04,2025,00,48" (den,měsíc,rok,hodina,minuta)
+            parts = datetime_str.split(',')
+            if len(parts) >= 5:
+                day = int(parts[0])
+                month = int(parts[1])
+                year = int(parts[2])
+                hour = int(parts[3])
+                minute = int(parts[4])
+                
+                return datetime(year, month, day, hour, minute)
+            elif len(parts) >= 3:
+                day = int(parts[0])
+                month = int(parts[1])
+                year = int(parts[2])
+                
+                return datetime(year, month, day)
+                
+        except (ValueError, IndexError):
+            logger.warning(f"Nepodařilo se parsovat datum: {datetime_str}")
+        
+        return None
     
     def _is_odds_row(self, row_data: Dict) -> bool:
         """Určí, zda řádek obsahuje kurzy"""
