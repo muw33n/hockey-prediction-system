@@ -428,13 +428,13 @@ class BetExplorerScraper:
             
             # Získej kurzy pro různé typy trhů
             market_types = [
-                ('HA', 'moneyline_2way'),  # Domácí/Hosté (2-way)
-                ('1x2', '1x2')            # 1X2 (3-way) - pro úplnost
+                ('HA', 'moneyline_2way', 2),  # Domácí/Hosté (2-way)
+                # ('1x2', '1x2', 3)            # 1X2 (3-way) - pro úplnost
             ]
             
-            for market_code, market_name in market_types:
+            for market_code, market_name, expected_odds_count in market_types:
                 try:
-                    market_odds = self._fetch_match_odds(match_id, market_code, market_name)
+                    market_odds = self._fetch_match_odds(match_id, market_code, market_name, expected_odds_count)
                     if market_odds:
                         odds_data.extend(market_odds)
                 except Exception as e:
@@ -472,7 +472,7 @@ class BetExplorerScraper:
             
             # Fallback: regex pro 8 znaků
             import re
-            match_id_pattern = r'/([a-zA-Z0-9]{8})/?(?:odds/?)?'
+            match_id_pattern = r'/([a-zA-Z0-9]{8})/?(?:odds/?)?$'
             match = re.search(match_id_pattern, match_url)
             if match:
                 return match.group(1)
@@ -484,7 +484,7 @@ class BetExplorerScraper:
             logger.error(f"Chyba při extrakci match ID: {e}")
             return None
 
-    def _fetch_match_odds(self, match_id: str, market_code: str, market_name: str) -> List[Dict]:
+    def _fetch_match_odds(self, match_id: str, market_code: str, market_name: str, expected_odds_count: int) -> List[Dict]:
         """Načte kurzy pro konkrétní zápas a trh"""
         try:
             # Sestav API URL
@@ -508,256 +508,174 @@ class BetExplorerScraper:
                 logger.warning(f"Klíč 'odds' nenalezen v odpovědi pro {market_name}")
                 return []
             
-            return self._parse_odds_response(data, market_name)
+            return self._parse_odds_response(data, market_name, expected_odds_count)
             
         except Exception as e:
             logger.error(f"Chyba při načítání kurzů pro {market_name}: {e}")
             return []
         
-    def _parse_odds_response(self, response_data: Dict, market_name: str) -> List[Dict]:
-        """Parsuje JSON odpověď s kurzy (obsahuje HTML fragment)"""
+    def _parse_odds_response(self, response_data: Dict, market_name: str, expected_odds_count: int) -> List[Dict]:
+        """Parsuje JSON odpověď s HTML obsahem kurzů"""
         odds_list = []
         
         try:
-            # Získej HTML fragment z klíče "odds"
+            # API vrací HTML obsah v klíči "odds"
             html_content = response_data.get('odds', '')
             if not html_content:
-                logger.warning(f"Prázdný HTML fragment pro {market_name}")
+                logger.warning(f"Prázdný HTML obsah kurzů pro {market_name}")
                 return []
             
-            # Parsuj HTML fragment
+            # Parsuj HTML obsah
             soup = BeautifulSoup(html_content, 'html.parser')
             
             # Najdi tabulku s kurzy
-            odds_table = soup.find('table', class_='table-main')
+            odds_table = soup.find('table', {'class': 'table-main'})
             if not odds_table:
                 logger.warning(f"Tabulka s kurzy nenalezena pro {market_name}")
                 return []
             
-            # Získej header pro identifikaci sloupců
-            header_row = odds_table.find('thead')
-            if header_row:
-                header_cells = header_row.find_all('th')
-                logger.debug(f"Header sloupce: {[th.get_text(strip=True) for th in header_cells]}")
-            
-            # Parsuj řádky s kurzy
+            # Najdi řádky s kurzy v tbody
             tbody = odds_table.find('tbody')
             if not tbody:
-                logger.warning(f"Tělo tabulky nenalezeno pro {market_name}")
+                logger.warning(f"tbody tabulky nenalezen pro {market_name}")
                 return []
             
+            # Zpracuj každý řádek s bookmaker kurzy
             for row in tbody.find_all('tr'):
                 try:
-                    # Extrahuj název bookmaker
-                    bookmaker_cell = row.find('a', class_='in-bookmaker-logo-link')
-                    if not bookmaker_cell:
-                        continue
-
-                    bookmaker_name = bookmaker_cell.get_text(strip=True)
-                    
-                    # Najdi buňky s kurzy (mají data-odd atribut)
-                    odds_cells = row.find_all('td', attrs={'data-odd': True})
-                    
-                    if len(odds_cells) < 2:
-                        logger.debug(f"Nedostatek kurzů pro {bookmaker_name}")
-                        continue
-                    
-                    # Extrahuj kurzy a další metadata
-                    home_cell = odds_cells[0]  # První kurz = domácí
-                    away_cell = odds_cells[1]  # Druhý kurz = hosté
-                    
-                    home_odds = float(home_cell.get('data-odd'))
-                    away_odds = float(away_cell.get('data-odd'))
-                    
-                    # Extrahuj datum posledního updatu
-                    home_created = home_cell.get('data-created', '')
-                    away_created = away_cell.get('data-created', '')
-                    
-                    # Extrahuj opening odds
-                    home_opening = home_cell.get('data-opening-odd')
-                    away_opening = away_cell.get('data-opening-odd')
-                    opening_date = home_cell.get('data-opening-date', '')
-                    
-                    # Sestavení záznamu
-                    odds_entry = {
-                        'bookmaker': bookmaker_name,
-                        'market_type': market_name,
-                        'odds': {
-                            'home': home_odds,
-                            'away': away_odds
-                        },
-                        'timestamp': datetime.now(),
-                        'last_updated': self._parse_betexplorer_datetime(home_created),
-                        'metadata': {
-                            'home_opening_odds': float(home_opening) if home_opening else None,
-                            'away_opening_odds': float(away_opening) if away_opening else None,
-                            'opening_date': self._parse_betexplorer_datetime(opening_date),
-                            'bookmaker_id': home_cell.get('data-bookie-id'),
-                            'bet_url': home_cell.get('data-bet-url')
-                        }
-                    }
-                    
-                    odds_list.append(odds_entry)
-                    logger.debug(f"Parsován kurz: {bookmaker_name} - Domácí: {home_odds}, Hosté: {away_odds}")
-                    
-                except Exception as e:
-                    logger.warning(f"Chyba při parsování řádku kurzů: {e}")
-                    continue
-
-            # Pokus o extrakci průměrných kurzů
-            tfoot = odds_table.find('tfoot')
-            if tfoot:
-                avg_cells = tfoot.find_all('td', attrs={'data-odd': True})
-                if len(avg_cells) >= 2:
-                    try:
-                        avg_home = float(avg_cells[0].get('data-odd'))
-                        avg_away = float(avg_cells[1].get('data-odd'))
-
-                        odds_entry = {
-                            'bookmaker': 'Average',
-                            'market_type': market_name,
-                            'odds': {
-                                'home': avg_home,
-                                'away': avg_away
-                            },
-                            'timestamp': datetime.now(),
-                            'metadata': {
-                                'is_average': True
-                            }
-                        }
+                    odds_entry = self._parse_bookmaker_row(row, market_name, expected_odds_count)
+                    if odds_entry:
                         odds_list.append(odds_entry)
-                        logger.debug(f"Parsován průměr: Domácí: {avg_home}, Hosté: {avg_away}")
-                        
-                    except Exception as e:
-                        logger.warning(f"Chyba při parsování průměrných kurzů: {e}")
+                except Exception as e:
+                    logger.warning(f"Chyba při zpracování řádku kurzu: {e}")
+                    continue
+                
+            # Zpracuj také průměrné kurzy z tfoot
+            try:
+                average_odds = self._parse_average_odds(odds_table, market_name, expected_odds_count)
+                if average_odds:
+                    odds_list.append(average_odds)
+            except Exception as e:
+                logger.warning(f"Chyba při zpracování průměrných kurzů: {e}")
             
-            logger.info(f"Parsováno {len(odds_list)} kurzů pro {market_name}")
-            
+            logger.debug(f"Parsováno {len(odds_list)} kurzů pro {market_name}")
+
         except Exception as e:
-            logger.error(f"Chyba při parsování kurzů: {e}")
+            logger.error(f"Chyba při parsování HTML kurzů: {e}")
         
         return odds_list
- 
-    def _parse_betexplorer_datetime(self, datetime_str: str) -> Optional[datetime]:
-        """Parsuje datum/čas z betexplorer formátu"""
-        if not datetime_str:
-            return None
-        
+    
+    def _parse_bookmaker_row(self, row, market_name: str, expected_odds_count: int) -> Optional[Dict]:
+        """Parsuje řádek s kurzy konkrétního bookmaker"""
         try:
-            # Format: "18,04,2025,00,48" (den,měsíc,rok,hodina,minuta)
-            parts = datetime_str.split(',')
-            if len(parts) >= 5:
-                day = int(parts[0])
-                month = int(parts[1])
-                year = int(parts[2])
-                hour = int(parts[3])
-                minute = int(parts[4])
-                
-                return datetime(year, month, day, hour, minute)
-            elif len(parts) >= 3:
-                day = int(parts[0])
-                month = int(parts[1])
-                year = int(parts[2])
-                
-                return datetime(year, month, day)
-                
-        except (ValueError, IndexError):
-            logger.warning(f"Nepodařilo se parsovat datum: {datetime_str}")
-        
-        return None
-    
-    def _is_odds_row(self, row_data: Dict) -> bool:
-        """Určí, zda řádek obsahuje kurzy"""
-        # Search for columns with numeric values ​​(odds)
-        for key, value in row_data.items():
-            try:
-                float_val = float(value.replace(',', '.'))
-                if 1.0 <= float_val <= 100.0:  # Typical course range
-                    return True
-            except ValueError:
-                continue
-        return False
-    
-    def _process_odds_row(self, row_data: Dict) -> Optional[Dict]:
-        """Zpracuje řádek s kurzy"""
-        try:
-            # Identify the bookmaker (usually the first column)
-            bookmaker = None
-            odds = {}
-            
-            for key, value in row_data.items():
-                if not bookmaker and not self._is_numeric_odds(value):
-                    bookmaker = value
-                elif self._is_numeric_odds(value):
-                    odds[key] = float(value.replace(',', '.'))
-            
-            if bookmaker and odds:
-                return {
-                    'bookmaker': bookmaker,
-                    'odds': odds,
-                    'market_type': 'main'  # Expand for different types of markets
-                }
-            
-        except Exception as e:
-            logger.error(f"Chyba při zpracování řádku kurzů: {e}")
-        
-        return None
-    
-    def _is_numeric_odds(self, value: str) -> bool:
-        """Zkontroluje, zda hodnota vypadá jako kurz"""
-        try:
-            float_val = float(value.replace(',', '.'))
-            return 1.0 <= float_val <= 100.0
-        except ValueError:
-            return False
-    
-    def _parse_date(self, date_text: str) -> Optional[date]:
-        """Parsuje datum z různých formátů"""
-        # Different data formats that betexplorer uses
-        date_formats = [
-            "%d.%m.%Y",
-            "%d/%m/%Y", 
-            "%Y-%m-%d",
-            "%d.%m.%y",
-            "%d/%m/%y"
-        ]
-        
-        # Clear text
-        date_clean = re.sub(r'[^\d./\-]', '', date_text.strip())
-        
-        for fmt in date_formats:
-            try:
-                parsed_date = datetime.strptime(date_clean, fmt).date()
-                return parsed_date
-            except ValueError:
-                continue
-        
-        logger.warning(f"Nepodařilo se parsovat datum: {date_text}")
-        return None
-    
-    def _parse_score(self, score_text: str) -> Optional[Tuple[int, int]]:
-        """Parsuje výsledek zápasu"""
-        try:
-            # Expected format: "3:2" or "3-2"
-            score_clean = re.sub(r'[^\d:\-]', '', score_text.strip())
-            
-            if ':' in score_clean:
-                parts = score_clean.split(':')
-            elif '-' in score_clean:
-                parts = score_clean.split('-')
+            # Najdi název bookmaker - v odkazu nebo span elementu
+            bookmaker_link = row.find('a', class_=lambda x: x and 'in-bookmaker-logo-link' in x)
+            if bookmaker_link:
+                bookmaker_name = bookmaker_link.get_text(strip=True)
             else:
+                # Fallback - hledej v span
+                bookmaker_span = row.find('span', class_=lambda x: x and 'in-bookmaker-logo' in x)
+                if bookmaker_span:
+                    bookmaker_name = bookmaker_span.get('title', 'Unknown')
+                else:
+                    logger.warning("Bookmaker název nenalezen v řádku")
+                    return None
+            
+            # Najdi buňky s kurzy (td elementy s data-odd atributem)
+            odds_cells = row.find_all('td', {'data-odd': True})
+            
+            if len(odds_cells) < expected_odds_count:
+                logger.warning(f"Nedostatek kurzů pro {bookmaker_name} (nalezeno {len(odds_cells)}, očekáváno {expected_odds_count})")
                 return None
             
-            if len(parts) == 2:
-                home_score = int(parts[0])
-                away_score = int(parts[1])
-                return (home_score, away_score)
+            # Extrahuj kurzy podle typu trhu
+            odds_info = {}
+            
+            if expected_odds_count == 2:  # HA (Home/Away)
+                odds_info['home_odd'] = float(odds_cells[0].get('data-odd'))
+                odds_info['away_odd'] = float(odds_cells[1].get('data-odd'))
                 
-        except (ValueError, IndexError):
-            pass
+                # Přidej opening odds pokud jsou dostupné
+                for i, cell in enumerate(odds_cells[:2]):
+                    prefix = 'home' if i == 0 else 'away'
+                    self._add_additional_odds_info(cell, odds_info, prefix)
+                    
+            elif expected_odds_count == 3:  # 1X2 (Home/Draw/Away)
+                odds_info['home_odd'] = float(odds_cells[0].get('data-odd'))
+                odds_info['draw_odd'] = float(odds_cells[1].get('data-odd'))
+                odds_info['away_odd'] = float(odds_cells[2].get('data-odd'))
+                
+                # Přidej opening odds pokud jsou dostupné
+                prefixes = ['home', 'draw', 'away']
+                for i, cell in enumerate(odds_cells[:3]):
+                    self._add_additional_odds_info(cell, odds_info, prefixes[i])
+            
+            return {
+                'bookmaker': bookmaker_name,
+                'market_type': market_name,
+                'odds': odds_info,
+                'timestamp': datetime.now(),
+                'source': 'betexplorer_api'
+            }
+
+        except Exception as e:
+            logger.error(f"Chyba při parsování řádku bookmaker: {e}")
+            return None
+    
+    def _add_additional_odds_info(self, cell, odds_info: dict, prefix: str):
+        """Přidá dodatečné informace o kurzech (opening odds, datumy)"""
+        opening_odd = cell.get('data-opening-odd')
+        opening_date = cell.get('data-opening-date')
+        created_date = cell.get('data-created')
         
-        logger.warning(f"Nepodařilo se parsovat výsledek: {score_text}")
-        return None
+        if opening_odd:
+            try:
+                odds_info[f'{prefix}_opening_odd'] = float(opening_odd)
+            except ValueError:
+                pass
+        
+        if opening_date:
+            odds_info[f'{prefix}_opening_date'] = opening_date
+            
+        if created_date:
+            odds_info[f'{prefix}_created_date'] = created_date
+    
+    def _parse_average_odds(self, table, market_name: str, expected_odds_count: int) -> Optional[Dict]:
+        """Parsuje průměrné kurzy z tfoot"""
+        try:
+            tfoot = table.find('tfoot')
+            if not tfoot:
+                return None
+            
+            # Najdi buňky s průměrnými kurzy
+            avg_cells = tfoot.find_all('td', {'data-odd': True})
+            
+            if len(avg_cells) < expected_odds_count:
+                return None
+            
+            # Extrahuj průměrné kurzy podle typu trhu
+            odds_info = {}
+            
+            if expected_odds_count == 2:  # HA (Home/Away)
+                odds_info['home_odd'] = float(avg_cells[0].get('data-odd'))
+                odds_info['away_odd'] = float(avg_cells[1].get('data-odd'))
+                
+            elif expected_odds_count == 3:  # 1X2 (Home/Draw/Away)
+                odds_info['home_odd'] = float(avg_cells[0].get('data-odd'))
+                odds_info['draw_odd'] = float(avg_cells[1].get('data-odd'))
+                odds_info['away_odd'] = float(avg_cells[2].get('data-odd'))
+            
+            return {
+                'bookmaker': 'Average',
+                'market_type': market_name,
+                'odds': odds_info,
+                'timestamp': datetime.now(),
+                'source': 'betexplorer_api'
+            }
+            
+        except Exception as e:
+            logger.error(f"Chyba při parsování průměrných kurzů: {e}")
+            return None
     
     def scrape_season_odds(self, season: str, max_matches: Optional[int] = None) -> List[Dict]:
         """
@@ -906,7 +824,6 @@ class BetExplorerScraper:
             self.driver.quit()
             logger.info("🔒 WebDriver uzavřen")
 
-
 def main():
     """Hlavní funkce pro spuštění scraperu"""
     
@@ -922,6 +839,7 @@ def main():
     logger.info("🏒 Spouštím BetExplorer scraper pro NHL kurzy")
     logger.info(f"Sezóny: {', '.join(SEASONS)}")
     logger.info(f"Max zápasů na sezónu: {MAX_MATCHES_PER_SEASON or 'všechny'}")
+    logger.info("Typy kurzů: HA (2-way Moneyline)") # , 1X2 (3-way Moneyline)")
     
     # Initialize scraper
     scraper = BetExplorerScraper(use_selenium=USE_SELENIUM)
@@ -966,7 +884,6 @@ def main():
     finally:
         # Close scraper
         scraper.close()
-
 
 if __name__ == "__main__":
     main()
