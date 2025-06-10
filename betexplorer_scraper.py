@@ -327,19 +327,30 @@ class BetExplorerScraper:
             home_team = self.team_mapping.get(home_team, home_team)
             away_team = self.team_mapping.get(away_team, away_team)
             
-            # Extrahuj datum z data-dt atributu
-            match_date = None
+            # Extrahuj datum a čas z data-dt atributu
+            match_datetime = None
             date_elem = soup.find(attrs={'data-dt': True})
             if date_elem:
                 date_string = date_elem.get('data-dt')
-                # Format: "31,10,2021,21,00"
+                # Format: "31,10,2021,21,00" (den,měsíc,rok,hodina,minuta)
                 date_parts = date_string.split(',')
-                if len(date_parts) >= 3:
+                if len(date_parts) >= 5:
                     try:
                         day = int(date_parts[0])
                         month = int(date_parts[1])
                         year = int(date_parts[2])
-                        match_date = date(year, month, day)
+                        hour = int(date_parts[3])
+                        minute = int(date_parts[4])
+                        match_datetime = datetime(year, month, day, hour, minute)
+                    except (ValueError, IndexError):
+                        logger.warning(f"Nepodařilo se parsovat datum/čas: {date_string}")
+                elif len(date_parts) >= 3:
+                    # Fallback - pouze datum bez času
+                    try:
+                        day = int(date_parts[0])
+                        month = int(date_parts[1])
+                        year = int(date_parts[2])
+                        match_datetime = datetime(year, month, day)
                     except (ValueError, IndexError):
                         logger.warning(f"Nepodařilo se parsovat datum: {date_string}")
             
@@ -387,7 +398,7 @@ class BetExplorerScraper:
             result = {
                 'home_team': home_team,
                 'away_team': away_team,
-                'match_date': match_date,
+                'match_datetime': match_datetime,
                 'home_score': home_score,
                 'away_score': away_score,
                 'status': status
@@ -634,11 +645,55 @@ class BetExplorerScraper:
             except ValueError:
                 pass
         
+        # Parsuj opening date do datetime objektu
         if opening_date:
-            odds_info[f'{prefix}_opening_date'] = opening_date
-            
+            parsed_opening_date = self._parse_betexplorer_datetime(opening_date)
+            if parsed_opening_date:
+                odds_info[f'{prefix}_opening_datetime'] = parsed_opening_date
+            else:
+                # Fallback - uložit surový formát pokud parsování selže
+                odds_info[f'{prefix}_opening_date_raw'] = opening_date
+        
+        # Parsuj created date do datetime objektu    
         if created_date:
-            odds_info[f'{prefix}_created_date'] = created_date
+            parsed_created_date = self._parse_betexplorer_datetime(created_date)
+            if parsed_created_date:
+                odds_info[f'{prefix}_created_datetime'] = parsed_created_date
+            else:
+                # Fallback - uložit surový formát pokud parsování selže
+                odds_info[f'{prefix}_created_date_raw'] = created_date
+
+    def _parse_betexplorer_datetime(self, date_string: str) -> Optional[datetime]:
+        """
+        Parsuje datetime z betexplorer formátu
+        
+        Args:
+            date_string: Datum ve formátu "16,04,2025,21,33" nebo "31,10,2021,21,00"
+        
+        Returns:
+            datetime objekt nebo None
+        """
+        try:
+            # Format: "den,měsíc,rok,hodina,minuta"
+            date_parts = date_string.split(',')
+            if len(date_parts) >= 5:
+                day = int(date_parts[0])
+                month = int(date_parts[1])
+                year = int(date_parts[2])
+                hour = int(date_parts[3])
+                minute = int(date_parts[4])
+                return datetime(year, month, day, hour, minute)
+            elif len(date_parts) >= 3:
+                # Fallback - pouze datum
+                day = int(date_parts[0])
+                month = int(date_parts[1])
+                year = int(date_parts[2])
+                return datetime(year, month, day)
+            else:
+                return None
+        except (ValueError, IndexError):
+            logger.warning(f"Nepodařilo se parsovat betexplorer datum: {date_string}")
+            return None
     
     def _parse_average_odds(self, table, market_name: str, expected_odds_count: int) -> Optional[Dict]:
         """Parsuje průměrné kurzy z tfoot"""
@@ -785,6 +840,7 @@ class BetExplorerScraper:
             base_match_info = {
                 'season': match.get('season'),
                 'match_date': match.get('match_date'),
+                'match_datetime': match.get('match_datetime'),
                 'home_team': match.get('home_team'),
                 'away_team': match.get('away_team'),
                 'home_score': match.get('home_score'),
@@ -832,7 +888,7 @@ def main():
     os.makedirs('logs', exist_ok=True)
     
     # Configuration
-    SEASONS = ['2021-2022', '2022-2023', '2023-2024']  # Seasons to download
+    SEASONS = ['2021-2022', '2022-2023', '2023-2024', '2024-2025']  # Seasons to download
     MAX_MATCHES_PER_SEASON = 50  # For testing (50) - set to None for all matches
     USE_SELENIUM = True  # Use Selenium for dynamic content
     
