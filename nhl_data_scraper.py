@@ -51,15 +51,78 @@ class NHLScraper:
             logger.error(f"Error fetching {url}: {e}")
             return None
     
+    def _parse_game_time(self, time_cell) -> Optional[str]:
+        """
+        Parse game time from the time cell
+        Returns time in HH:MM format or None if not found
+        """
+        if not time_cell:
+            return None
+            
+        time_text = time_cell.text.strip()
+        if not time_text or time_text in ['', 'Time']:
+            return None
+        
+        try:
+            # Try common Hockey-Reference formats
+            formats_to_try = [
+                '%I:%M %p',    # "1:00 PM", "7:30 AM"
+                '%I %p',       # "7 PM", "1 AM"  
+                '%H:%M',       # "19:00", "13:30"
+                '%H'           # "19", "13"
+            ]
+            
+            for fmt in formats_to_try:
+                try:
+                    parsed_time = datetime.strptime(time_text, fmt).time()
+                    return parsed_time.strftime('%H:%M')
+                except ValueError:
+                    continue
+            
+            # If nothing worked, return None
+            logger.warning(f"Could not parse time format: '{time_text}'")
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Error parsing time '{time_text}': {e}")
+            return None
+    
+    def _extract_boxscore_url(self, date_cell) -> str:
+        """
+        Extract boxscore URL from the date cell link
+        
+        Args:
+            date_cell: BeautifulSoup cell containing the date with link
+            
+        Returns:
+            Full boxscore URL or empty string if not found
+        """
+        try:
+            # Look for the link in the date cell
+            date_link = date_cell.find('a')
+            if date_link and date_link.get('href'):
+                relative_url = date_link.get('href')
+                # Convert relative URL to absolute URL
+                if relative_url.startswith('/'):
+                    return f"{self.base_url}{relative_url}"
+                else:
+                    return relative_url
+            
+            return ""
+            
+        except Exception as e:
+            logger.warning(f"Could not extract boxscore URL: {e}")
+            return ""
+            
     def get_season_schedule(self, season: str) -> pd.DataFrame:
         """
-        Get all games for a specific season
+        Get all games for a specific season with enhanced datetime and boxscore URLs
         
         Args:
             season: Season year (e.g., '2024' for 2023-24 season)
             
         Returns:
-            DataFrame with game results
+            DataFrame with game results including datetime and boxscore URLs
         """
         url = f"{self.base_url}/leagues/NHL_{season}_games.html"
         soup = self._make_request(url)
@@ -88,17 +151,40 @@ class NHLScraper:
                 continue
             
             try:
-                # Extract game data
+                # Extract game data - column positions may vary
                 date_cell = cells[0]
-                visitor_cell = cells[2]
-                home_cell = cells[4]
+                time_cell = cells[1]# if len(cells) > 7 else None
+                visitor_cell = cells[2]# if len(cells) > 7 else cells[1]
+                home_cell = cells[4]# if len(cells) > 7 else cells[3]
                 
-                # Parse date
+                # Parse date and extract boxscore URL from the same cell
                 date_text = date_cell.text.strip()
                 if not date_text or date_text in ['Date', '']:
                     continue
                     
                 game_date = datetime.strptime(date_text, '%Y-%m-%d').date()
+                
+                # Extract boxscore URL from date cell
+                boxscore_url = self._extract_boxscore_url(date_cell)
+                
+                # Parse time
+                game_time = self._parse_game_time(time_cell)
+                
+                # Create datetime object
+                if game_time:
+                    hour, minute = game_time.split(':')
+                    game_datetime = datetime.combine(
+                        game_date, 
+                        datetime.min.time().replace(hour=int(hour), minute=int(minute))
+                    )
+                    game_datetime_iso = game_datetime.strftime('%Y-%m-%d %H:%M:%S')
+                else:
+                    # Default time if not found (most NHL games are around 7-8 PM)
+                    game_datetime = datetime.combine(
+                        game_date,
+                        datetime.min.time().replace(hour=19, minute=0)  # Default 7:00 PM
+                    )
+                    game_datetime_iso = game_datetime.strftime('%Y-%m-%d %H:%M:%S')
                 
                 # Extract team names and scores
                 visitor_team = visitor_cell.find('a')
@@ -114,28 +200,35 @@ class NHLScraper:
                 visitor_score = None
                 home_score = None
                 
-                if len(cells) > 4:
-                    visitor_score_cell = cells[3]
-                    home_score_cell = cells[5]
+                # Adjust indices based on whether time column exists
+                #if len(cells) > 7:  # Time column exists
+                visitor_score_cell = cells[3]
+                home_score_cell = cells[5]
+                ot_cell_idx = 6
+                #else:  # No time column
+                 #   visitor_score_cell = cells[2]
+                  #  home_score_cell = cells[4]
+                   # ot_cell_idx = 5
                     
-                    try:
-                        visitor_score = int(visitor_score_cell.text.strip())
-                        home_score = int(home_score_cell.text.strip())
-                    except (ValueError, AttributeError):
-                        # Game not yet played or in progress
-                        pass
+                try:
+                    visitor_score = int(visitor_score_cell.text.strip())
+                    home_score = int(home_score_cell.text.strip())
+                except (ValueError, AttributeError):
+                    # Game not yet played or in progress
+                    pass
                 
                 # Determine game status
                 status = 'completed' if visitor_score is not None else 'scheduled'
                 
                 # Overtime/Shootout info
                 ot_so = ''
-                if len(cells) > 5:
-                    ot_cell = cells[6]
+                if len(cells) > ot_cell_idx:
+                    ot_cell = cells[ot_cell_idx]
                     ot_so = ot_cell.text.strip()
                 
                 game_data = {
-                    'date': game_date,
+                    'datetime': game_datetime_iso,  # ISO format with time
+                    'date': game_date,              # Keep original date for compatibility
                     'season': season,
                     'visitor_team': visitor_name,
                     'home_team': home_name,
@@ -143,6 +236,7 @@ class NHLScraper:
                     'home_score': home_score,
                     'overtime_shootout': ot_so,
                     'status': status,
+                    'boxscore_url': boxscore_url,   # New boxscore URL
                     'scraped_at': datetime.now()
                 }
                 
@@ -193,6 +287,10 @@ class NHLScraper:
                     if stats_table_1:
                         stats_table = stats_table_1
                         break
+        
+        if not stats_table:
+            logger.error(f"No team stats table found for season {season} even in comments")
+            return pd.DataFrame()
         
         stats_data = []
         
@@ -358,7 +456,7 @@ def main():
         current_year += 1
     
     start_season = current_year - 3
-    end_season = current_year - 1 
+    end_season = current_year
     
     logger.info(f"Starting NHL data scraping for seasons {start_season-1}-{start_season-1+1} to {end_season-1}-{str(end_season)[2:]}")
     
@@ -379,7 +477,8 @@ def main():
         'seasons_scraped': f"{start_season}-{end_season}",
         'total_games': len(data.get('games', [])),
         'total_teams': len(data.get('team_stats', [])),
-        'data_files': list(data.keys())
+        'data_files': list(data.keys()),
+        'enhancements': 'datetime_iso_format,boxscore_urls'
     }
     
     summary_df = pd.DataFrame([summary])
@@ -395,6 +494,7 @@ def main():
             completed_games = df[df['status'] == 'completed']
             logger.info(f"  Completed games: {len(completed_games)}")
             logger.info(f"  Scheduled games: {len(df) - len(completed_games)}")
+            logger.info(f"  Enhanced features: datetime (ISO), boxscore URLs")
         
         logger.info(f"  Date range: {df['season'].min()} - {df['season'].max()}")
 
