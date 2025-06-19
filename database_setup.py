@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
-Database setup with better permission handling
+Database setup with updated schema for:
+- Arizona Coyotes -> Utah Mammoth transition
+- Datetime with timezone support
+- Odds storage for moneyline 2-way
+- URL storage for additional game information
 """
 
 import pandas as pd
@@ -29,18 +33,109 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class DatabaseManager:
-    """Manages database operations with better permission handling"""
+    """Manages database operations with updated schema"""
     
     def __init__(self):
         self.database_url = os.getenv('DATABASE_URL')
         self.engine = create_engine(self.database_url)
         self.Session = sessionmaker(bind=self.engine)
         
+        # Define data directories
+        self.data_paths = {
+            'nhl_data': os.path.join('data', 'raw'),
+            'odds_data': os.path.join('data', 'odds')
+        }
+        
+        # Create directories if they don't exist
+        self.ensure_data_directories()
+        
+        # Log available data files at startup
+        self.log_available_files()
+        
+    def ensure_data_directories(self):
+        """Ensure data directories exist"""
+        
+        for dir_type, dir_path in self.data_paths.items():
+            if not os.path.exists(dir_path):
+                logger.warning(f"📁 Data directory not found: {dir_path}")
+                logger.info(f"Creating directory: {dir_path}")
+                os.makedirs(dir_path, exist_ok=True)
+            else:
+                logger.info(f"📁 Data directory found: {dir_path}")
+    
+    def log_available_files(self):
+        """Log all available data files for debugging"""
+        
+        logger.info("📁 Scanning for data files...")
+        
+        # NHL data files (in data/raw/)
+        nhl_file_patterns = [
+            ('Games', 'nhl_games_*.csv'),
+            ('Team Stats', 'nhl_team_stats_*.csv'), 
+            ('Standings', 'nhl_standings_*.csv')
+        ]
+        
+        logger.info(f"  📂 NHL Data Directory: {self.data_paths['nhl_data']}")
+        for file_type, pattern in nhl_file_patterns:
+            full_pattern = os.path.join(self.data_paths['nhl_data'], pattern)
+            files = glob.glob(full_pattern)
+            if files:
+                files.sort(reverse=True)  # Most recent first
+                logger.info(f"    {file_type}: {len(files)} files found")
+                for i, file in enumerate(files[:3]):  # Show first 3
+                    age_indicator = "🆕" if i == 0 else "📄"
+                    rel_path = os.path.relpath(file)
+                    logger.info(f"      {age_indicator} {rel_path}")
+                if len(files) > 3:
+                    logger.info(f"      ... and {len(files) - 3} more files")
+            else:
+                logger.warning(f"    {file_type}: No files found matching '{pattern}'")
+        
+        # Odds files (in data/odds/)
+        logger.info(f"  📂 Odds Directory: {self.data_paths['odds_data']}")
+        odds_pattern = os.path.join(self.data_paths['odds_data'], 'nhl_odds_*.csv')
+        odds_files = glob.glob(odds_pattern)
+        if odds_files:
+            odds_files.sort(reverse=True)
+            logger.info(f"    Odds: {len(odds_files)} files found")
+            for i, file in enumerate(odds_files[:3]):
+                age_indicator = "🆕" if i == 0 else "📄"
+                rel_path = os.path.relpath(file)
+                logger.info(f"      {age_indicator} {rel_path}")
+            if len(odds_files) > 3:
+                logger.info(f"      ... and {len(odds_files) - 3} more files")
+        else:
+            logger.warning(f"    Odds: No files found matching 'nhl_odds_*.csv'")
+    
+    def extract_timestamp_from_filename(self, filename: str) -> str:
+        """Extract timestamp from filename for sorting and logging"""
+        
+        try:
+            # Extract timestamp from pattern like: nhl_games_20250616-190551.csv
+            import re
+            match = re.search(r'_(\d{8}-\d{6})\.csv$', os.path.basename(filename))
+            if match:
+                timestamp_str = match.group(1)
+                # Convert to readable format: 20250616-190551 -> 2025-06-16 19:05:51
+                date_part = timestamp_str[:8]
+                time_part = timestamp_str[9:]
+                formatted_date = f"{date_part[:4]}-{date_part[4:6]}-{date_part[6:8]}"
+                formatted_time = f"{time_part[:2]}:{time_part[2:4]}:{time_part[4:6]}"
+                return f"{formatted_date} {formatted_time}"
+            return "Unknown timestamp"
+        except Exception:
+            return "Invalid timestamp"
+        
+        # Team name mapping for Arizona -> Utah transition
+        self.team_name_mapping = {
+            'Arizona Coyotes': 'Utah Mammoth',
+            'Utah Hockey Club': 'Utah Mammoth'
+        }
+        
     def check_permissions(self):
         """Check if we have necessary permissions"""
         try:
             with self.engine.connect() as conn:
-                # Try to create a test table
                 conn.execute(text("CREATE TABLE IF NOT EXISTS test_permissions (id SERIAL PRIMARY KEY)"))
                 conn.execute(text("DROP TABLE IF EXISTS test_permissions"))
                 conn.commit()
@@ -52,24 +147,28 @@ class DatabaseManager:
             return False
     
     def create_tables(self):
-        """Create all necessary tables with error handling"""
+        """Create all necessary tables with updated schema"""
         
-        # Check permissions first
         if not self.check_permissions():
             logger.error("❌ Insufficient permissions. Please fix permissions first.")
             return False
         
-        # SQL for creating tables (same as before but with better error handling)
         create_tables_sql = """
         -- Drop existing tables if they exist
         DROP TABLE IF EXISTS value_bets CASCADE;
         DROP TABLE IF EXISTS predictions CASCADE;
         DROP TABLE IF EXISTS odds CASCADE;
+        DROP TABLE IF EXISTS game_urls CASCADE;
         DROP TABLE IF EXISTS goalie_stats CASCADE;
         DROP TABLE IF EXISTS player_stats CASCADE;
         DROP TABLE IF EXISTS team_stats CASCADE;
         DROP TABLE IF EXISTS games CASCADE;
+        DROP TABLE IF EXISTS team_venues CASCADE;
+        DROP TABLE IF EXISTS team_history CASCADE;
         DROP TABLE IF EXISTS teams CASCADE;
+        DROP TABLE IF EXISTS venue_history CASCADE;
+        DROP TABLE IF EXISTS venues CASCADE;
+        DROP TABLE IF EXISTS franchises CASCADE;
         DROP TABLE IF EXISTS leagues CASCADE;
         
         -- Leagues table
@@ -83,64 +182,231 @@ class DatabaseManager:
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         
-        -- Teams table
+        -- Franchises table - core entity that survives relocations
+        CREATE TABLE franchises (
+            id SERIAL PRIMARY KEY,
+            franchise_name VARCHAR(100) NOT NULL,
+            founded_date DATE,
+            founded_city VARCHAR(100),
+            is_active BOOLEAN DEFAULT TRUE,
+            notes TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        
+        -- Venues/Stadiums table
+        CREATE TABLE venues (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(100) NOT NULL,
+            city VARCHAR(100),
+            state_province VARCHAR(50),
+            country VARCHAR(50),
+            address TEXT,
+            capacity INTEGER,
+            opened_date DATE,
+            closed_date DATE,
+            surface_type VARCHAR(50),
+            venue_type VARCHAR(50), -- home, neutral, outdoor, international
+            latitude DECIMAL(10,8),
+            longitude DECIMAL(11,8),
+            is_active BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        
+        -- Venue history - tracks name changes, renovations
+        CREATE TABLE venue_history (
+            id SERIAL PRIMARY KEY,
+            venue_id INTEGER REFERENCES venues(id) ON DELETE CASCADE,
+            name VARCHAR(100) NOT NULL,
+            capacity INTEGER,
+            effective_from DATE NOT NULL,
+            effective_to DATE,
+            change_reason VARCHAR(100),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        
+        -- Enhanced teams table
         CREATE TABLE teams (
             id SERIAL PRIMARY KEY,
+            franchise_id INTEGER REFERENCES franchises(id),
             name VARCHAR(100) NOT NULL,
             city VARCHAR(100),
             league_id INTEGER REFERENCES leagues(id),
             conference VARCHAR(50),
             division VARCHAR(50),
             abbreviation VARCHAR(10),
+            effective_from DATE NOT NULL,
+            effective_to DATE,
+            is_current BOOLEAN DEFAULT FALSE,
+            change_reason VARCHAR(100),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(franchise_id, effective_from)
+        );
+        
+        -- Team history tracking
+        CREATE TABLE team_history (
+            id SERIAL PRIMARY KEY,
+            franchise_id INTEGER REFERENCES franchises(id),
+            from_team_id INTEGER REFERENCES teams(id),
+            to_team_id INTEGER REFERENCES teams(id),
+            change_date DATE NOT NULL,
+            change_type VARCHAR(50) NOT NULL, -- relocation, rename, expansion, merger, fold, revival
+            from_city VARCHAR(100),
+            to_city VARCHAR(100),
+            from_name VARCHAR(100),
+            to_name VARCHAR(100),
+            description TEXT,
+            source VARCHAR(100),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         
-        -- Games table
+        -- Team-venue relationships
+        CREATE TABLE team_venues (
+            id SERIAL PRIMARY KEY,
+            team_id INTEGER REFERENCES teams(id),
+            venue_id INTEGER REFERENCES venues(id),
+            started_playing DATE NOT NULL,
+            stopped_playing DATE,
+            is_primary_venue BOOLEAN DEFAULT TRUE,
+            relationship_type VARCHAR(50), -- home, temporary, neutral
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        
+        -- Games table with venue reference and datetime timezone support
         CREATE TABLE games (
             id SERIAL PRIMARY KEY,
             date DATE NOT NULL,
-            season VARCHAR(10) NOT NULL,
+            -- Store datetime in Eastern Time (NHL standard)
+            datetime_et TIMESTAMP WITHOUT TIME ZONE,
+            season INTEGER NOT NULL,
             league_id INTEGER REFERENCES leagues(id),
             home_team_id INTEGER REFERENCES teams(id),
             away_team_id INTEGER REFERENCES teams(id),
+            venue_id INTEGER REFERENCES venues(id), -- NEW: Where the game was played
             home_score INTEGER,
             away_score INTEGER,
-            overtime_shootout VARCHAR(10),
+            overtime_shootout VARCHAR(20),
             status VARCHAR(20) DEFAULT 'scheduled',
-            stage VARCHAR(20) DEFAULT 'regular',
-            scraped_at TIMESTAMP,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            game_type VARCHAR(50) DEFAULT 'regular', -- regular, playoff, exhibition, outdoor, neutral
+            -- Original data tracking
+            scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            data_source VARCHAR(100),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(date, home_team_id, away_team_id)
         );
         
-        -- Team statistics table
+        -- Game URLs table for storing additional links
+        CREATE TABLE game_urls (
+            id SERIAL PRIMARY KEY,
+            game_id INTEGER REFERENCES games(id) ON DELETE CASCADE,
+            url_type VARCHAR(50) NOT NULL, -- 'boxscore', 'betting', 'stats', etc.
+            url TEXT NOT NULL,
+            source VARCHAR(100), -- 'hockey-reference', 'betexplorer', etc.
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(game_id, url_type, source)
+        );
+        
+        -- Odds table for moneyline 2-way betting
+        CREATE TABLE odds (
+            id SERIAL PRIMARY KEY,
+            game_id INTEGER REFERENCES games(id) ON DELETE CASCADE,
+            bookmaker VARCHAR(100) NOT NULL,
+            market_type VARCHAR(50) NOT NULL, -- 'moneyline_2way', 'over_under', etc.
+            
+            -- Home team odds
+            home_odd DECIMAL(8,4),
+            home_opening_odd DECIMAL(8,4),
+            home_opening_datetime TIMESTAMP,
+            home_last_update TIMESTAMP,
+            
+            -- Away team odds
+            away_odd DECIMAL(8,4),
+            away_opening_odd DECIMAL(8,4),
+            away_opening_datetime TIMESTAMP,
+            away_last_update TIMESTAMP,
+            
+            -- Metadata
+            scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            data_source VARCHAR(100),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            
+            UNIQUE(game_id, bookmaker, market_type)
+        );
+        
+        -- Team stats table
         CREATE TABLE team_stats (
             id SERIAL PRIMARY KEY,
             team_id INTEGER REFERENCES teams(id),
-            season VARCHAR(10) NOT NULL,
+            season INTEGER NOT NULL,
             games_played INTEGER,
             wins INTEGER,
             losses INTEGER,
             overtime_losses INTEGER,
             points INTEGER,
+            points_percentage DECIMAL(5,3),
             goals_for INTEGER,
             goals_against INTEGER,
-            goal_differential INTEGER,
-            shots_for INTEGER,
-            shots_against INTEGER,
+            shootout_wins INTEGER,
+            shootout_losses INTEGER,
+            
+            -- Advanced stats
+            srs DECIMAL(6,3), -- Simple Rating System
+            sos DECIMAL(6,3), -- Strength of Schedule
+            goals_for_per_game DECIMAL(5,2),
+            goals_against_per_game DECIMAL(5,2),
+            
+            -- Power play stats
             power_play_goals INTEGER,
             power_play_opportunities INTEGER,
+            power_play_percentage DECIMAL(5,2),
+            
+            -- Penalty kill stats
             penalty_kill_percentage DECIMAL(5,2),
-            face_off_win_percentage DECIMAL(5,2),
-            scraped_at TIMESTAMP,
+            short_handed_goals INTEGER,
+            short_handed_goals_allowed INTEGER,
+            
+            -- Shooting stats
+            shots INTEGER,
+            shot_percentage DECIMAL(5,2),
+            shots_against INTEGER,
+            save_percentage DECIMAL(5,3),
+            shutouts INTEGER,
+            
+            -- Discipline
+            penalties_per_game DECIMAL(5,2),
+            opponent_penalties_per_game DECIMAL(5,2),
+            
+            -- Other
+            average_age DECIMAL(4,1),
+            
+            scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(team_id, season)
+        );
+        
+        -- Goalie stats table
+        CREATE TABLE goalie_stats (
+            id SERIAL PRIMARY KEY,
+            team_id INTEGER REFERENCES teams(id),
+            season INTEGER NOT NULL,
+            player_name VARCHAR(100),
+            games_played INTEGER,
+            wins INTEGER,
+            losses INTEGER,
+            overtime_losses INTEGER,
+            saves INTEGER,
+            shots_against INTEGER,
+            save_percentage DECIMAL(5,3),
+            goals_against_average DECIMAL(5,2),
+            shutouts INTEGER,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         
-        -- Player statistics table
+        -- Player stats table
         CREATE TABLE player_stats (
             id SERIAL PRIMARY KEY,
-            player_name VARCHAR(100) NOT NULL,
             team_id INTEGER REFERENCES teams(id),
-            season VARCHAR(10) NOT NULL,
+            season INTEGER NOT NULL,
+            player_name VARCHAR(100),
             position VARCHAR(10),
             games_played INTEGER,
             goals INTEGER,
@@ -150,39 +416,6 @@ class DatabaseManager:
             penalty_minutes INTEGER,
             shots INTEGER,
             shooting_percentage DECIMAL(5,2),
-            scraped_at TIMESTAMP,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        
-        -- Goalie statistics table
-        CREATE TABLE goalie_stats (
-            id SERIAL PRIMARY KEY,
-            player_name VARCHAR(100) NOT NULL,
-            team_id INTEGER REFERENCES teams(id),
-            season VARCHAR(10) NOT NULL,
-            games_played INTEGER,
-            wins INTEGER,
-            losses INTEGER,
-            overtime_losses INTEGER,
-            saves INTEGER,
-            shots_against INTEGER,
-            save_percentage DECIMAL(5,3),
-            goals_against_average DECIMAL(4,2),
-            shutouts INTEGER,
-            scraped_at TIMESTAMP,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        
-        -- Odds table
-        CREATE TABLE odds (
-            id SERIAL PRIMARY KEY,
-            game_id INTEGER REFERENCES games(id),
-            bookmaker VARCHAR(50) NOT NULL,
-            market_type VARCHAR(50) NOT NULL,
-            selection VARCHAR(100) NOT NULL,
-            odds_decimal DECIMAL(6,2) NOT NULL,
-            odds_american INTEGER,
-            timestamp TIMESTAMP NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         
@@ -190,15 +423,13 @@ class DatabaseManager:
         CREATE TABLE predictions (
             id SERIAL PRIMARY KEY,
             game_id INTEGER REFERENCES games(id),
-            model_name VARCHAR(50) NOT NULL,
-            model_version VARCHAR(20),
-            home_win_prob DECIMAL(4,3),
-            away_win_prob DECIMAL(4,3),
-            over_under_prob DECIMAL(4,3),
-            predicted_home_score DECIMAL(3,1),
-            predicted_away_score DECIMAL(3,1),
-            confidence_score DECIMAL(4,3),
-            timestamp TIMESTAMP NOT NULL,
+            model_name VARCHAR(100),
+            model_version VARCHAR(50),
+            home_win_probability DECIMAL(5,4),
+            away_win_probability DECIMAL(5,4),
+            prediction_datetime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            features_used TEXT, -- JSON string of features
+            confidence_score DECIMAL(5,4),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         
@@ -206,38 +437,59 @@ class DatabaseManager:
         CREATE TABLE value_bets (
             id SERIAL PRIMARY KEY,
             game_id INTEGER REFERENCES games(id),
-            bookmaker VARCHAR(50) NOT NULL,
-            market_type VARCHAR(50) NOT NULL,
-            selection VARCHAR(100) NOT NULL,
-            our_probability DECIMAL(4,3) NOT NULL,
-            bookmaker_probability DECIMAL(4,3) NOT NULL,
-            bookmaker_odds DECIMAL(6,2) NOT NULL,
-            expected_value DECIMAL(6,3) NOT NULL,
-            kelly_fraction DECIMAL(6,4),
-            recommended_stake DECIMAL(8,2),
-            bet_placed BOOLEAN DEFAULT FALSE,
-            result VARCHAR(20),
-            profit_loss DECIMAL(8,2),
-            timestamp TIMESTAMP NOT NULL,
+            odds_id INTEGER REFERENCES odds(id),
+            prediction_id INTEGER REFERENCES predictions(id),
+            bet_type VARCHAR(50), -- 'home', 'away', 'over', 'under'
+            recommended_stake DECIMAL(10,2),
+            expected_value DECIMAL(8,4),
+            kelly_percentage DECIMAL(5,4),
+            confidence_level VARCHAR(20),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         
-        -- Create indexes
+        -- Create indexes for better performance
         CREATE INDEX idx_games_date ON games(date);
         CREATE INDEX idx_games_season ON games(season);
         CREATE INDEX idx_games_teams ON games(home_team_id, away_team_id);
+        CREATE INDEX idx_games_venue ON games(venue_id);
+        CREATE INDEX idx_odds_game_bookmaker ON odds(game_id, bookmaker);
         CREATE INDEX idx_team_stats_season ON team_stats(season);
-        CREATE INDEX idx_odds_game_id ON odds(game_id);
-        CREATE INDEX idx_predictions_game_id ON predictions(game_id);
-        CREATE INDEX idx_value_bets_game_id ON value_bets(game_id);
-        CREATE INDEX idx_value_bets_expected_value ON value_bets(expected_value DESC);
+        CREATE INDEX idx_predictions_game ON predictions(game_id);
+        CREATE INDEX idx_value_bets_game ON value_bets(game_id);
+        
+        -- New indexes for team/franchise tracking
+        CREATE INDEX idx_teams_franchise ON teams(franchise_id);
+        CREATE INDEX idx_teams_effective_dates ON teams(effective_from, effective_to);
+        CREATE INDEX idx_teams_current ON teams(is_current) WHERE is_current = TRUE;
+        CREATE INDEX idx_team_history_franchise ON team_history(franchise_id);
+        CREATE INDEX idx_team_history_date ON team_history(change_date);
+        CREATE INDEX idx_venue_history_dates ON venue_history(venue_id, effective_from, effective_to);
+        
+        -- Helper views for easier querying
+        CREATE VIEW current_teams AS
+        SELECT t.*, f.franchise_name 
+        FROM teams t 
+        JOIN franchises f ON t.franchise_id = f.id 
+        WHERE t.is_current = TRUE;
+        
+        CREATE OR REPLACE FUNCTION get_team_for_date(franchise_id_param INT, game_date DATE)
+        RETURNS TABLE(team_id INT, team_name VARCHAR, city VARCHAR, abbreviation VARCHAR) AS $$
+        BEGIN
+            RETURN QUERY
+            SELECT t.id, t.name, t.city, t.abbreviation
+            FROM teams t
+            WHERE t.franchise_id = franchise_id_param
+              AND t.effective_from <= game_date
+              AND (t.effective_to IS NULL OR t.effective_to > game_date);
+        END;
+        $$ LANGUAGE plpgsql;
         """
         
         try:
             with self.engine.connect() as conn:
                 conn.execute(text(create_tables_sql))
                 conn.commit()
-                logger.info("✅ Database tables created successfully!")
+                logger.info("✅ All tables created successfully")
                 return True
                 
         except Exception as e:
@@ -250,62 +502,18 @@ class DatabaseManager:
             return False
     
     def insert_initial_data(self):
-        """Insert initial leagues and teams data"""
+        """Insert initial leagues, franchises and teams data with proper history tracking"""
         
         try:
-            # Insert NHL league
-            nhl_league_sql = """
-            INSERT INTO leagues (name, country, level, season_start, season_end)
-            VALUES ('NHL', 'North America', 1, 2023, 2024)
-            ON CONFLICT DO NOTHING
-            RETURNING id;
-            """
-            
-            # NHL teams data (same as before)
-            nhl_teams = [
-                # Eastern Conference - Atlantic Division
-                ('Boston Bruins', 'Boston', 'Eastern', 'Atlantic', 'BOS'),
-                ('Buffalo Sabres', 'Buffalo', 'Eastern', 'Atlantic', 'BUF'),
-                ('Detroit Red Wings', 'Detroit', 'Eastern', 'Atlantic', 'DET'),
-                ('Florida Panthers', 'Sunrise', 'Eastern', 'Atlantic', 'FLA'),
-                ('Montreal Canadiens', 'Montreal', 'Eastern', 'Atlantic', 'MTL'),
-                ('Ottawa Senators', 'Ottawa', 'Eastern', 'Atlantic', 'OTT'),
-                ('Tampa Bay Lightning', 'Tampa Bay', 'Eastern', 'Atlantic', 'TBL'),
-                ('Toronto Maple Leafs', 'Toronto', 'Eastern', 'Atlantic', 'TOR'),
-                
-                # Eastern Conference - Metropolitan Division
-                ('Carolina Hurricanes', 'Raleigh', 'Eastern', 'Metropolitan', 'CAR'),
-                ('Columbus Blue Jackets', 'Columbus', 'Eastern', 'Metropolitan', 'CBJ'),
-                ('New Jersey Devils', 'Newark', 'Eastern', 'Metropolitan', 'NJD'),
-                ('New York Islanders', 'Elmont', 'Eastern', 'Metropolitan', 'NYI'),
-                ('New York Rangers', 'New York', 'Eastern', 'Metropolitan', 'NYR'),
-                ('Philadelphia Flyers', 'Philadelphia', 'Eastern', 'Metropolitan', 'PHI'),
-                ('Pittsburgh Penguins', 'Pittsburgh', 'Eastern', 'Metropolitan', 'PIT'),
-                ('Washington Capitals', 'Washington', 'Eastern', 'Metropolitan', 'WSH'),
-                
-                # Western Conference - Central Division
-                ('Arizona Coyotes', 'Tempe', 'Western', 'Central', 'ARI'),
-                ('Chicago Blackhawks', 'Chicago', 'Western', 'Central', 'CHI'),
-                ('Colorado Avalanche', 'Denver', 'Western', 'Central', 'COL'),
-                ('Dallas Stars', 'Dallas', 'Western', 'Central', 'DAL'),
-                ('Minnesota Wild', 'Saint Paul', 'Western', 'Central', 'MIN'),
-                ('Nashville Predators', 'Nashville', 'Western', 'Central', 'NSH'),
-                ('St. Louis Blues', 'St. Louis', 'Western', 'Central', 'STL'),
-                ('Winnipeg Jets', 'Winnipeg', 'Western', 'Central', 'WPG'),
-                
-                # Western Conference - Pacific Division
-                ('Anaheim Ducks', 'Anaheim', 'Western', 'Pacific', 'ANA'),
-                ('Calgary Flames', 'Calgary', 'Western', 'Pacific', 'CGY'),
-                ('Edmonton Oilers', 'Edmonton', 'Western', 'Pacific', 'EDM'),
-                ('Los Angeles Kings', 'Los Angeles', 'Western', 'Pacific', 'LAK'),
-                ('San Jose Sharks', 'San Jose', 'Western', 'Pacific', 'SJS'),
-                ('Seattle Kraken', 'Seattle', 'Western', 'Pacific', 'SEA'),
-                ('Vancouver Canucks', 'Vancouver', 'Western', 'Pacific', 'VAN'),
-                ('Vegas Golden Knights', 'Las Vegas', 'Western', 'Pacific', 'VGK'),
-            ]
-            
             with self.engine.connect() as conn:
                 # Insert NHL league
+                nhl_league_sql = """
+                INSERT INTO leagues (name, country, level, season_start, season_end)
+                VALUES ('NHL', 'North America', 1, 2021, 2025)
+                ON CONFLICT DO NOTHING
+                RETURNING id;
+                """
+                
                 result = conn.execute(text(nhl_league_sql))
                 league_row = result.fetchone()
                 
@@ -316,203 +524,811 @@ class DatabaseManager:
                     result = conn.execute(text("SELECT id FROM leagues WHERE name = 'NHL'"))
                     nhl_league_id = result.fetchone()[0]
                 
-                # Insert teams with better error handling
+                # Insert franchises with proper historical tracking
+                franchises_data = [
+                    (1, 'Boston Bruins Franchise', '1924-11-01', 'Boston'),
+                    (2, 'Buffalo Sabres Franchise', '1970-05-12', 'Buffalo'),
+                    (3, 'Detroit Red Wings Franchise', '1926-05-15', 'Detroit'),
+                    (4, 'Florida Panthers Franchise', '1993-06-14', 'Miami'),
+                    (5, 'Montreal Canadiens Franchise', '1909-12-04', 'Montreal'),
+                    (6, 'Ottawa Senators Franchise', '1992-12-16', 'Ottawa'),
+                    (7, 'Tampa Bay Lightning Franchise', '1992-12-16', 'Tampa Bay'),
+                    (8, 'Toronto Maple Leafs Franchise', '1917-11-26', 'Toronto'),
+                    (9, 'Carolina Hurricanes Franchise', '1979-06-22', 'Hartford'),  # Originally Hartford Whalers
+                    (10, 'Columbus Blue Jackets Franchise', '2000-06-25', 'Columbus'),
+                    (11, 'New Jersey Devils Franchise', '1974-06-11', 'Kansas City'),  # Originally Kansas City Scouts
+                    (12, 'New York Islanders Franchise', '1972-11-08', 'Uniondale'),
+                    (13, 'New York Rangers Franchise', '1926-05-15', 'New York'),
+                    (14, 'Philadelphia Flyers Franchise', '1967-06-05', 'Philadelphia'),
+                    (15, 'Pittsburgh Penguins Franchise', '1967-06-05', 'Pittsburgh'),
+                    (16, 'Washington Capitals Franchise', '1974-06-11', 'Washington'),
+                    (17, 'Chicago Blackhawks Franchise', '1926-05-15', 'Chicago'),
+                    (18, 'Colorado Avalanche Franchise', '1979-06-22', 'Quebec City'),  # Originally Quebec Nordiques
+                    (19, 'Dallas Stars Franchise', '1967-06-05', 'Minneapolis'),  # Originally Minnesota North Stars
+                    (20, 'Minnesota Wild Franchise', '2000-06-25', 'Saint Paul'),
+                    (21, 'Nashville Predators Franchise', '1998-06-25', 'Nashville'),
+                    (22, 'St. Louis Blues Franchise', '1967-06-05', 'St. Louis'),
+                    (23, 'Arizona/Utah Franchise', '1979-06-22', 'Winnipeg'),  # Originally Winnipeg Jets
+                    (24, 'Winnipeg Jets Franchise', '1999-06-25', 'Atlanta'),  # Originally Atlanta Thrashers
+                    (25, 'Anaheim Ducks Franchise', '1993-06-15', 'Anaheim'),
+                    (26, 'Calgary Flames Franchise', '1972-06-06', 'Atlanta'),  # Originally Atlanta Flames
+                    (27, 'Edmonton Oilers Franchise', '1979-06-22', 'Edmonton'),
+                    (28, 'Los Angeles Kings Franchise', '1967-06-05', 'Los Angeles'),
+                    (29, 'San Jose Sharks Franchise', '1991-05-09', 'San Jose'),
+                    (30, 'Seattle Kraken Franchise', '2021-07-21', 'Seattle'),
+                    (31, 'Vancouver Canucks Franchise', '1970-05-12', 'Vancouver'),
+                    (32, 'Vegas Golden Knights Franchise', '2017-06-22', 'Las Vegas'),
+                ]
+                
+                for franchise_id, name, founded_date, founded_city in franchises_data:
+                    franchise_sql = """
+                    INSERT INTO franchises (id, franchise_name, founded_date, founded_city, is_active)
+                    VALUES (:id, :name, :founded_date, :founded_city, TRUE)
+                    ON CONFLICT (id) DO NOTHING;
+                    """
+                    conn.execute(text(franchise_sql), {
+                        'id': franchise_id,
+                        'name': name,
+                        'founded_date': founded_date,
+                        'founded_city': founded_city
+                    })
+                
+                # Insert current team identities
+                current_teams = [
+                    (1, 'Boston Bruins', 'Boston', 'Eastern', 'Atlantic', 'BOS', '1924-11-01'),
+                    (2, 'Buffalo Sabres', 'Buffalo', 'Eastern', 'Atlantic', 'BUF', '1970-05-12'),
+                    (3, 'Detroit Red Wings', 'Detroit', 'Eastern', 'Atlantic', 'DET', '1932-10-05'),
+                    (4, 'Florida Panthers', 'Sunrise', 'Eastern', 'Atlantic', 'FLA', '1993-10-06'),
+                    (5, 'Montreal Canadiens', 'Montreal', 'Eastern', 'Atlantic', 'MTL', '1917-11-26'),
+                    (6, 'Ottawa Senators', 'Ottawa', 'Eastern', 'Atlantic', 'OTT', '1992-10-08'),
+                    (7, 'Tampa Bay Lightning', 'Tampa Bay', 'Eastern', 'Atlantic', 'TBL', '1992-10-07'),
+                    (8, 'Toronto Maple Leafs', 'Toronto', 'Eastern', 'Atlantic', 'TOR', '1927-02-17'),
+                    (9, 'Carolina Hurricanes', 'Raleigh', 'Eastern', 'Metropolitan', 'CAR', '1997-10-29'),
+                    (10, 'Columbus Blue Jackets', 'Columbus', 'Eastern', 'Metropolitan', 'CBJ', '2000-10-07'),
+                    (11, 'New Jersey Devils', 'Newark', 'Eastern', 'Metropolitan', 'NJD', '1982-10-05'),
+                    (12, 'New York Islanders', 'Elmont', 'Eastern', 'Metropolitan', 'NYI', '1972-10-07'),
+                    (13, 'New York Rangers', 'New York', 'Eastern', 'Metropolitan', 'NYR', '1926-11-16'),
+                    (14, 'Philadelphia Flyers', 'Philadelphia', 'Eastern', 'Metropolitan', 'PHI', '1967-10-11'),
+                    (15, 'Pittsburgh Penguins', 'Pittsburgh', 'Eastern', 'Metropolitan', 'PIT', '1967-10-11'),
+                    (16, 'Washington Capitals', 'Washington', 'Eastern', 'Metropolitan', 'WSH', '1974-10-09'),
+                    (17, 'Chicago Blackhawks', 'Chicago', 'Western', 'Central', 'CHI', '1926-11-17'),
+                    (18, 'Colorado Avalanche', 'Denver', 'Western', 'Central', 'COL', '1995-10-06'),
+                    (19, 'Dallas Stars', 'Dallas', 'Western', 'Central', 'DAL', '1993-10-05'),
+                    (20, 'Minnesota Wild', 'Saint Paul', 'Western', 'Central', 'MIN', '2000-10-06'),
+                    (21, 'Nashville Predators', 'Nashville', 'Western', 'Central', 'NSH', '1998-10-10'),
+                    (22, 'St. Louis Blues', 'St. Louis', 'Western', 'Central', 'STL', '1967-10-11'),
+                    (23, 'Utah Mammoth', 'Salt Lake City', 'Western', 'Central', 'UTA', '2024-04-18'),
+                    (24, 'Winnipeg Jets', 'Winnipeg', 'Western', 'Central', 'WPG', '2011-10-09'),
+                    (25, 'Anaheim Ducks', 'Anaheim', 'Western', 'Pacific', 'ANA', '1993-10-08'),
+                    (26, 'Calgary Flames', 'Calgary', 'Western', 'Pacific', 'CGY', '1980-10-09'),
+                    (27, 'Edmonton Oilers', 'Edmonton', 'Western', 'Pacific', 'EDM', '1979-10-10'),
+                    (28, 'Los Angeles Kings', 'Los Angeles', 'Western', 'Pacific', 'LAK', '1967-10-14'),
+                    (29, 'San Jose Sharks', 'San Jose', 'Western', 'Pacific', 'SJS', '1991-10-04'),
+                    (30, 'Seattle Kraken', 'Seattle', 'Western', 'Pacific', 'SEA', '2021-10-12'),
+                    (31, 'Vancouver Canucks', 'Vancouver', 'Western', 'Pacific', 'VAN', '1970-10-09'),
+                    (32, 'Vegas Golden Knights', 'Las Vegas', 'Western', 'Pacific', 'VGK', '2017-10-06'),
+                ]
+                
                 teams_inserted = 0
-                for name, city, conference, division, abbrev in nhl_teams:
+                for franchise_id, name, city, conference, division, abbrev, effective_from in current_teams:
                     try:
                         team_sql = """
-                        INSERT INTO teams (name, city, league_id, conference, division, abbreviation)
-                        VALUES (:name, :city, :league_id, :conference, :division, :abbreviation)
-                        ON CONFLICT DO NOTHING;
+                        INSERT INTO teams (franchise_id, name, city, league_id, conference, division, 
+                                         abbreviation, effective_from, is_current)
+                        VALUES (:franchise_id, :name, :city, :league_id, :conference, :division, 
+                               :abbreviation, :effective_from, TRUE)
+                        ON CONFLICT (franchise_id, effective_from) DO NOTHING;
                         """
+                        
                         conn.execute(text(team_sql), {
+                            'franchise_id': franchise_id,
                             'name': name,
                             'city': city,
                             'league_id': nhl_league_id,
                             'conference': conference,
                             'division': division,
-                            'abbreviation': abbrev
+                            'abbreviation': abbrev,
+                            'effective_from': effective_from
                         })
                         teams_inserted += 1
                     except Exception as e:
                         logger.warning(f"Failed to insert team {name}: {e}")
                 
+                # Insert key historical team transitions
+                # Arizona Coyotes history
+                historical_arizona_teams = [
+                    (23, 'Winnipeg Jets', 'Winnipeg', 'Western', 'Smythe', 'WPG', '1979-10-10', '1996-04-13'),
+                    (23, 'Phoenix Coyotes', 'Phoenix', 'Western', 'Pacific', 'PHX', '1996-04-13', '2014-06-27'),
+                    (23, 'Arizona Coyotes', 'Glendale', 'Western', 'Pacific', 'ARI', '2014-06-27', '2024-04-18'),
+                ]
+                
+                for franchise_id, name, city, conference, division, abbrev, effective_from, effective_to in historical_arizona_teams:
+                    team_sql = """
+                    INSERT INTO teams (franchise_id, name, city, league_id, conference, division, 
+                                     abbreviation, effective_from, effective_to, is_current)
+                    VALUES (:franchise_id, :name, :city, :league_id, :conference, :division, 
+                           :abbreviation, :effective_from, :effective_to, FALSE)
+                    ON CONFLICT (franchise_id, effective_from) DO NOTHING;
+                    """
+                    
+                    conn.execute(text(team_sql), {
+                        'franchise_id': franchise_id,
+                        'name': name,
+                        'city': city,
+                        'league_id': nhl_league_id,
+                        'conference': conference,
+                        'division': division,
+                        'abbreviation': abbrev,
+                        'effective_from': effective_from,
+                        'effective_to': effective_to
+                    })
+                
                 conn.commit()
-                logger.info(f"✅ Inserted NHL league and {teams_inserted} teams")
+                logger.info(f"✅ Inserted NHL league, franchises and {teams_inserted} current teams")
+                logger.info("✅ Historical team transitions configured (Arizona/Utah)")
                 return True
                 
         except Exception as e:
             logger.error(f"❌ Error inserting initial data: {e}")
             return False
     
-    # Rest of the methods remain the same...
-    def import_scraped_data(self, data_directory: str = "data/raw"):
-        """Import scraped CSV data into database"""
+    def get_team_id_for_date(self, team_name: str, game_date: str, conn) -> Optional[int]:
+        """Get team ID for a specific date, handling historical team changes"""
+        
+        # Normalize the team name for known variations
+        normalized_name = self.normalize_team_name(team_name)
+        
+        # Convert game_date to date object if it's a string
+        if isinstance(game_date, str):
+            game_date = pd.to_datetime(game_date).date()
+        
+        # First try to find current team with exact name match
+        current_team_sql = """
+        SELECT id FROM teams 
+        WHERE name = :team_name AND is_current = TRUE
+        """
+        result = conn.execute(text(current_team_sql), {'team_name': normalized_name})
+        current_team = result.fetchone()
+        
+        if current_team:
+            return current_team[0]
+        
+        # If not found, search in historical teams for the specific date
+        historical_team_sql = """
+        SELECT id FROM teams 
+        WHERE name = :team_name 
+          AND effective_from <= :game_date
+          AND (effective_to IS NULL OR effective_to > :game_date)
+        """
+        result = conn.execute(text(historical_team_sql), {
+            'team_name': normalized_name,
+            'game_date': game_date
+        })
+        historical_team = result.fetchone()
+        
+        if historical_team:
+            return historical_team[0]
+        
+        # If still not found, try to find by franchise and map to current team
+        # This handles cases where we have old team names in data but want current team
+        franchise_mapping = {
+            'Arizona Coyotes': 'Utah Mammoth',
+            'Utah Hockey Club': 'Utah Mammoth',
+            'Phoenix Coyotes': 'Utah Mammoth',
+            'Winnipeg Jets': self._resolve_jets_name(game_date),  # Two different Jets franchises
+        }
+        
+        if normalized_name in franchise_mapping:
+            mapped_name = franchise_mapping[normalized_name]
+            return self.get_team_id_for_date(mapped_name, game_date, conn)
+        
+        logger.warning(f"Team not found: {team_name} (normalized: {normalized_name}) for date {game_date}")
+        return None
+    
+    def _resolve_jets_name(self, game_date) -> str:
+        """Resolve which Winnipeg Jets franchise based on date"""
+        cutoff_date = pd.to_datetime('2011-05-31').date()
+        if isinstance(game_date, str):
+            game_date = pd.to_datetime(game_date).date()
+        
+        if game_date <= cutoff_date:
+            # Original Jets franchise (now Utah Mammoth lineage)
+            return 'Utah Mammoth'  # Map to current identity
+        else:
+            # New Jets franchise (from Atlanta)
+            return 'Winnipeg Jets'
+    
+    def normalize_team_name(self, team_name: str) -> str:
+        """Normalize team names for consistency"""
+        # Remove common suffixes/prefixes
+        team_name = team_name.strip()
+        
+        # Basic mappings for data consistency
+        basic_mappings = {
+            'Utah Hockey Club': 'Utah Mammoth',
+            'Arizona Coyotes': 'Utah Mammoth',  # Map historical to current
+        }
+        
+        return basic_mappings.get(team_name, team_name)
+    
+    def import_scraped_data(self):
+        """Import data from CSV files with directory-aware search"""
         
         try:
-            # Find latest CSV files
-            csv_files = glob.glob(f"{data_directory}/nhl_*.csv")
-            if not csv_files:
-                logger.warning("No CSV files found to import")
-                return False
+            # Import games - find most recent file in data/raw/
+            games_files = self.find_latest_data_files('nhl_games')
+            for file_path in games_files:
+                logger.info(f"Importing games from {os.path.relpath(file_path)}...")
+                self.import_games_data(file_path)
             
-            # Get the latest timestamp
-            latest_files = [f for f in csv_files if 'summary' not in f]
-            if not latest_files:
-                logger.warning("No data CSV files found")
-                return False
+            if not games_files:
+                logger.warning(f"No games files found in {self.data_paths['nhl_data']}")
+            
+            # Import team stats
+            stats_files = self.find_latest_data_files('nhl_team_stats')
+            for file_path in stats_files:
+                logger.info(f"Importing team stats from {os.path.relpath(file_path)}...")
+                self.import_team_stats_data(file_path)
+            
+            if not stats_files:
+                logger.warning(f"No team stats files found in {self.data_paths['nhl_data']}")
+            
+            # Import standings (optional)
+            standings_files = self.find_latest_data_files('nhl_standings')
+            for file_path in standings_files:
+                logger.info(f"Importing standings from {os.path.relpath(file_path)}...")
+                self.import_standings_data(file_path)
+            
+            if standings_files:
+                logger.info(f"Found {len(standings_files)} standings files")
+            
+            # Import odds - search in data/odds/ directory
+            odds_pattern = os.path.join(self.data_paths['odds_data'], 'nhl_odds_*.csv')
+            odds_files = glob.glob(odds_pattern)
+            
+            if odds_files:
+                # Sort by timestamp for consistent processing
+                def extract_sort_key(filename):
+                    try:
+                        import re
+                        match = re.search(r'_(\d{8}-\d{6})\.csv$', os.path.basename(filename))
+                        if match:
+                            return match.group(1)
+                        return "00000000-000000"
+                    except Exception:
+                        return "00000000-000000"
                 
-            latest_timestamp = max([f.split('_')[-1].replace('.csv', '') for f in latest_files])
-            
-            # Import games data
-            games_file = f"{data_directory}/nhl_games_{latest_timestamp}.csv"
-            if os.path.exists(games_file):
-                self._import_games(games_file)
-            
-            # Import team stats data  
-            stats_file = f"{data_directory}/nhl_team_stats_{latest_timestamp}.csv"
-            if os.path.exists(stats_file):
-                self._import_team_stats(stats_file)
+                odds_files.sort(key=extract_sort_key, reverse=True)
+                logger.info(f"📊 Found {len(odds_files)} odds files in {self.data_paths['odds_data']}")
                 
-            logger.info("✅ Data import completed successfully!")
+                for file_path in odds_files:
+                    rel_path = os.path.relpath(file_path)
+                    timestamp = self.extract_timestamp_from_filename(file_path)
+                    logger.info(f"Importing odds from {rel_path} (scraped: {timestamp})...")
+                    self.import_odds_data(file_path)
+            else:
+                logger.warning(f"No odds files found in {self.data_paths['odds_data']}")
+            
             return True
             
         except Exception as e:
-            logger.error(f"❌ Error importing data: {e}")
+            logger.error(f"❌ Error importing scraped data: {e}")
             return False
     
-    def _import_games(self, filename: str):
-        """Import games data from CSV with better error handling"""
+    def find_latest_data_files(self, base_name: str, limit: int = 1) -> List[str]:
+        """Find the most recent data files for a given base name with directory-aware search"""
         
         try:
-            df = pd.read_csv(filename)
-            logger.info(f"Importing {len(df)} games from {filename}")
-            
-            # Get team name to ID mapping
-            team_mapping = self._get_team_mapping()
-            
-            if not team_mapping:
-                logger.error("No teams found in database. Please ensure teams are inserted first.")
-                return
-            
-            # Prepare data for insertion
-            games_data = []
-            skipped = 0
-            
-            for _, row in df.iterrows():
-                home_team_id = team_mapping.get(row['home_team'])
-                away_team_id = team_mapping.get(row['visitor_team'])
-                
-                if home_team_id and away_team_id:
-                    games_data.append({
-                        'date': row['date'],
-                        'season': row['season'],
-                        'league_id': 1,  # NHL
-                        'home_team_id': home_team_id,
-                        'away_team_id': away_team_id,
-                        'home_score': row['home_score'] if pd.notna(row['home_score']) else None,
-                        'away_score': row['visitor_score'] if pd.notna(row['visitor_score']) else None,
-                        'overtime_shootout': row.get('overtime_shootout', '') if pd.notna(row.get('overtime_shootout', '')) else '',
-                        'status': row['status'],
-                        'scraped_at': row['scraped_at']
-                    })
-                else:
-                    skipped += 1
-                    if skipped <= 5:  # Log first few skipped entries
-                        logger.warning(f"Skipped game: {row['visitor_team']} vs {row['home_team']} (teams not found)")
-            
-            # Insert data
-            if games_data:
-                games_df = pd.DataFrame(games_data)
-                games_df.to_sql('games', self.engine, if_exists='append', index=False)
-                logger.info(f"✅ Imported {len(games_data)} games (skipped {skipped})")
+            # Determine which directory to search based on file type
+            if base_name.startswith('nhl_odds'):
+                search_dir = self.data_paths['odds_data']
             else:
-                logger.warning("No games data to import")
+                search_dir = self.data_paths['nhl_data']
+            
+            # Pattern: nhl_games_20250616-190551.csv
+            pattern = os.path.join(search_dir, f"{base_name}_*.csv")
+            files = glob.glob(pattern)
+            
+            if not files:
+                logger.warning(f"No files found matching pattern: {pattern}")
+                return []
+            
+            # Sort by timestamp extracted from filename
+            def extract_sort_key(filename):
+                try:
+                    import re
+                    match = re.search(r'_(\d{8}-\d{6})\.csv$', os.path.basename(filename))
+                    if match:
+                        # Return timestamp as sortable string: 20250616-190551
+                        return match.group(1)
+                    return "00000000-000000"  # Fallback for files without timestamp
+                except Exception:
+                    return "00000000-000000"
+            
+            files.sort(key=extract_sort_key, reverse=True)  # Most recent first
+            
+            # Log what we found
+            logger.info(f"📄 Found {len(files)} {base_name} files in {search_dir}:")
+            for i, file in enumerate(files[:limit]):
+                timestamp = self.extract_timestamp_from_filename(file)
+                age_indicator = "🆕" if i == 0 else "📄"
+                rel_path = os.path.relpath(file)
+                logger.info(f"  {age_indicator} {rel_path} (scraped: {timestamp})")
+            
+            # Return the most recent file(s)
+            selected_files = files[:limit]
+            
+            if selected_files:
+                latest_file = selected_files[0]
+                timestamp = self.extract_timestamp_from_filename(latest_file)
+                rel_path = os.path.relpath(latest_file)
+                logger.info(f"✅ Using latest {base_name} file: {rel_path} (scraped: {timestamp})")
+            
+            return selected_files
+            
+        except Exception as e:
+            logger.error(f"Error finding files for {base_name}: {e}")
+            return []
+    
+    def verify_file_integrity(self, file_path: str) -> bool:
+        """Quick verification that CSV file is readable and has expected structure"""
+        
+        try:
+            # Try to read just the header and first few rows
+            df = pd.read_csv(file_path, nrows=5)
+            
+            if df.empty:
+                logger.warning(f"File appears to be empty: {file_path}")
+                return False
+            
+            # Log basic file info
+            total_rows = sum(1 for line in open(file_path, 'r', encoding='utf-8')) - 1  # Subtract header
+            logger.info(f"📊 File validation: {os.path.basename(file_path)}")
+            logger.info(f"  Rows: {total_rows:,}")
+            logger.info(f"  Columns: {len(df.columns)}")
+            logger.info(f"  Columns: {', '.join(df.columns[:8])}{'...' if len(df.columns) > 8 else ''}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"File integrity check failed for {file_path}: {e}")
+            return False
+    
+    def import_standings_data(self, file_path: str):
+        """Import standings data (similar structure to team_stats)"""
+        
+        try:
+            df = pd.read_csv(file_path)
+            standings_imported = 0
+            
+            with self.engine.connect() as conn:
+                for _, row in df.iterrows():
+                    try:
+                        # Clean team name (remove * and other suffixes)
+                        team_name = str(row.get('', '')).replace('*', '').strip()
+                        
+                        # For standings, we use the season year to determine the correct team identity
+                        season = int(row['season'])
+                        # Convert season to approximate date (start of season)
+                        season_start_date = pd.to_datetime(f'{season-1}-10-01').date()
+                        
+                        team_id = self.get_team_id_for_date(team_name, season_start_date, conn)
+                        if not team_id:
+                            logger.warning(f"Team not found in standings: {team_name} for season {season}")
+                            continue
+                        
+                        # Check if team_stats record exists, if not create basic one
+                        existing_stats = conn.execute(text("""
+                            SELECT id FROM team_stats WHERE team_id = :team_id AND season = :season
+                        """), {'team_id': team_id, 'season': season}).fetchone()
+                        
+                        if not existing_stats:
+                            # Create basic team_stats record from standings
+                            stats_sql = """
+                            INSERT INTO team_stats (
+                                team_id, season, games_played, wins, losses, overtime_losses, points,
+                                points_percentage, goals_for, goals_against, srs, sos
+                            )
+                            VALUES (
+                                :team_id, :season, :gp, :w, :l, :ol, :pts, :pts_pct, :gf, :ga, :srs, :sos
+                            )
+                            ON CONFLICT (team_id, season) DO UPDATE SET
+                                games_played = EXCLUDED.games_played,
+                                wins = EXCLUDED.wins,
+                                losses = EXCLUDED.losses,
+                                points = EXCLUDED.points;
+                            """
+                            
+                            conn.execute(text(stats_sql), {
+                                'team_id': team_id,
+                                'season': season,
+                                'gp': int(row['GP']) if pd.notna(row['GP']) else None,
+                                'w': int(row['W']) if pd.notna(row['W']) else None,
+                                'l': int(row['L']) if pd.notna(row['L']) else None,
+                                'ol': int(row['OL']) if pd.notna(row['OL']) else None,
+                                'pts': int(row['PTS']) if pd.notna(row['PTS']) else None,
+                                'pts_pct': float(row['PTS%']) if pd.notna(row['PTS%']) else None,
+                                'gf': int(row['GF']) if pd.notna(row['GF']) else None,
+                                'ga': int(row['GA']) if pd.notna(row['GA']) else None,
+                                'srs': float(row['SRS']) if pd.notna(row['SRS']) else None,
+                                'sos': float(row['SOS']) if pd.notna(row['SOS']) else None
+                            })
+                            
+                            standings_imported += 1
+                        
+                    except Exception as e:
+                        logger.error(f"Error importing standings row: {e}")
+                        continue
+                
+                conn.commit()
+                logger.info(f"✅ Imported {standings_imported} standings records from {file_path}")
                 
         except Exception as e:
-            logger.error(f"❌ Error importing games: {e}")
+            logger.error(f"❌ Error importing standings data: {e}")
     
-    def _import_team_stats(self, filename: str):
-        """Import team stats data from CSV with better error handling"""
+    def import_games_data(self, file_path: str):
+        """Import games data with enhanced team and venue handling"""
+        
+        # Verify file integrity first
+        if not self.verify_file_integrity(file_path):
+            logger.error(f"Skipping import of {file_path} due to integrity issues")
+            return
         
         try:
-            if not os.path.exists(filename):
-                logger.warning(f"Team stats file not found: {filename}")
-                return
+            df = pd.read_csv(file_path)
+            games_imported = 0
+            games_skipped = 0
+            
+            logger.info(f"🎯 Starting import of {len(df)} games from {os.path.basename(file_path)}")
+            
+            with self.engine.connect() as conn:
+                for _, row in df.iterrows():
+                    try:
+                        # Get team IDs using date-aware lookup
+                        game_date = pd.to_datetime(row['date']).date()
+                        
+                        home_team_id = self.get_team_id_for_date(row['home_team'], game_date, conn)
+                        away_team_id = self.get_team_id_for_date(row['visitor_team'], game_date, conn)
+                        
+                        if not home_team_id or not away_team_id:
+                            logger.debug(f"Teams not found: {row['home_team']}, {row['visitor_team']} for {game_date}")
+                            games_skipped += 1
+                            continue
+                        
+                        # Handle datetime - convert to datetime object if it's string
+                        datetime_et = pd.to_datetime(row.get('datetime')) if pd.notna(row.get('datetime')) else None
+                        
+                        # Get or create venue (for now, we'll create placeholder venues)
+                        venue_id = self.get_or_create_home_venue(home_team_id, conn)
+                        
+                        # Insert game
+                        game_sql = """
+                        INSERT INTO games (date, datetime_et, season, league_id, home_team_id, away_team_id,
+                                         venue_id, home_score, away_score, overtime_shootout, status, data_source)
+                        VALUES (:date, :datetime_et, :season, 1, :home_team_id, :away_team_id,
+                               :venue_id, :home_score, :away_score, :overtime_shootout, :status, 'hockey-reference')
+                        ON CONFLICT (date, home_team_id, away_team_id) DO UPDATE SET
+                            datetime_et = EXCLUDED.datetime_et,
+                            venue_id = EXCLUDED.venue_id,
+                            home_score = EXCLUDED.home_score,
+                            away_score = EXCLUDED.away_score,
+                            status = EXCLUDED.status
+                        RETURNING id;
+                        """
+                        
+                        result = conn.execute(text(game_sql), {
+                            'date': game_date,
+                            'datetime_et': datetime_et,
+                            'season': int(row['season']),
+                            'home_team_id': home_team_id,
+                            'away_team_id': away_team_id,
+                            'venue_id': venue_id,
+                            'home_score': int(row['home_score']) if pd.notna(row['home_score']) else None,
+                            'away_score': int(row['visitor_score']) if pd.notna(row['visitor_score']) else None,
+                            'overtime_shootout': row.get('overtime_shootout'),
+                            'status': row.get('status', 'completed')
+                        })
+                        
+                        game_row = result.fetchone()
+                        if game_row:
+                            game_id = game_row[0]
+                            
+                            # Insert boxscore URL if available
+                            if pd.notna(row.get('boxscore_url')):
+                                url_sql = """
+                                INSERT INTO game_urls (game_id, url_type, url, source)
+                                VALUES (:game_id, 'boxscore', :url, 'hockey-reference')
+                                ON CONFLICT (game_id, url_type, source) DO NOTHING;
+                                """
+                                conn.execute(text(url_sql), {
+                                    'game_id': game_id,
+                                    'url': row['boxscore_url']
+                                })
+                        
+                        games_imported += 1
+                        
+                        # Progress logging every 100 games
+                        if games_imported % 100 == 0:
+                            logger.info(f"  📈 Progress: {games_imported} games imported...")
+                        
+                    except Exception as e:
+                        logger.error(f"Error importing game row: {e}")
+                        games_skipped += 1
+                        continue
                 
-            df = pd.read_csv(filename)
-            logger.info(f"Importing {len(df)} team stats from {filename}")
-            
-            # Get team name to ID mapping
-            team_mapping = self._get_team_mapping()
-            
-            # Prepare data for insertion
-            stats_data = []
-            skipped = 0
-            
-            for _, row in df.iterrows():
-                team_id = team_mapping.get(row.get('Team', ''))
+                conn.commit()
+                logger.info(f"✅ Games import completed:")
+                logger.info(f"  📊 Imported: {games_imported} games")
+                logger.info(f"  ⚠️  Skipped: {games_skipped} games")
+                logger.info(f"  📁 Source: {os.path.basename(file_path)}")
                 
-                if team_id:
-                    stats_data.append({
-                        'team_id': team_id,
-                        'season': row['season'],
-                        'games_played': self._safe_int(row.get('GP')),
-                        'wins': self._safe_int(row.get('W')),
-                        'losses': self._safe_int(row.get('L')),
-                        'overtime_losses': self._safe_int(row.get('OL')),
-                        'points': self._safe_int(row.get('PTS')),
-                        'goals_for': self._safe_int(row.get('GF')),
-                        'goals_against': self._safe_int(row.get('GA')),
-                        'scraped_at': row['scraped_at']
-                    })
-                else:
-                    skipped += 1
-                    if skipped <= 5:
-                        logger.warning(f"Skipped team stats: {row.get('Team', 'Unknown')} (team not found)")
+        except Exception as e:
+            logger.error(f"❌ Error importing games data: {e}")
+    
+    def get_or_create_home_venue(self, team_id: int, conn) -> int:
+        """Get or create a placeholder venue for the home team"""
+        
+        # Check if venue already exists for this team
+        venue_check_sql = """
+        SELECT v.id FROM venues v
+        JOIN team_venues tv ON v.id = tv.venue_id
+        WHERE tv.team_id = :team_id AND tv.is_primary_venue = TRUE
+        LIMIT 1;
+        """
+        
+        result = conn.execute(text(venue_check_sql), {'team_id': team_id})
+        existing_venue = result.fetchone()
+        
+        if existing_venue:
+            return existing_venue[0]
+        
+        # Get team info for venue creation
+        team_info_sql = """
+        SELECT name, city FROM teams WHERE id = :team_id;
+        """
+        
+        result = conn.execute(text(team_info_sql), {'team_id': team_id})
+        team_info = result.fetchone()
+        
+        if not team_info:
+            logger.error(f"Team not found for ID: {team_id}")
+            return None
+        
+        team_name, city = team_info
+        
+        # Create placeholder venue
+        venue_sql = """
+        INSERT INTO venues (name, city, venue_type, is_active)
+        VALUES (:name, :city, 'home', TRUE)
+        RETURNING id;
+        """
+        
+        venue_name = f"{team_name} Home Arena"
+        result = conn.execute(text(venue_sql), {
+            'name': venue_name,
+            'city': city
+        })
+        
+        venue_id = result.fetchone()[0]
+        
+        # Link team to venue
+        team_venue_sql = """
+        INSERT INTO team_venues (team_id, venue_id, started_playing, is_primary_venue, relationship_type)
+        VALUES (:team_id, :venue_id, CURRENT_DATE, TRUE, 'home');
+        """
+        
+        conn.execute(text(team_venue_sql), {
+            'team_id': team_id,
+            'venue_id': venue_id
+        })
+        
+        logger.info(f"Created placeholder venue: {venue_name}")
+        return venue_id
+    
+    def import_odds_data(self, file_path: str):
+        """Import odds data with enhanced team name resolution"""
+        
+        try:
+            df = pd.read_csv(file_path)
+            odds_imported = 0
             
-            # Insert data
-            if stats_data:
-                stats_df = pd.DataFrame(stats_data)
-                stats_df.to_sql('team_stats', self.engine, if_exists='append', index=False)
-                logger.info(f"✅ Imported {len(stats_data)} team stats (skipped {skipped})")
-            else:
-                logger.warning("No team stats data to import")
+            with self.engine.connect() as conn:
+                for _, row in df.iterrows():
+                    try:
+                        # Get game date for team lookup
+                        game_date = pd.to_datetime(row['match_datetime']).date()
+                        
+                        # Get team IDs using date-aware lookup
+                        home_team_id = self.get_team_id_for_date(row['home_team'], game_date, conn)
+                        away_team_id = self.get_team_id_for_date(row['away_team'], game_date, conn)
+                        
+                        if not home_team_id or not away_team_id:
+                            continue
+                        
+                        # Find matching game
+                        datetime_match = pd.to_datetime(row['match_datetime'])
+                        game_sql = """
+                        SELECT id FROM games 
+                        WHERE home_team_id = :home_team_id 
+                          AND away_team_id = :away_team_id
+                          AND ABS(EXTRACT(EPOCH FROM (datetime_et - :match_datetime))) < 3600
+                        LIMIT 1;
+                        """
+                        
+                        game_result = conn.execute(text(game_sql), {
+                            'home_team_id': home_team_id,
+                            'away_team_id': away_team_id,
+                            'match_datetime': datetime_match
+                        })
+                        
+                        game_row = game_result.fetchone()
+                        if not game_row:
+                            continue
+                        
+                        game_id = game_row[0]
+                        
+                        # Insert odds
+                        odds_sql = """
+                        INSERT INTO odds (game_id, bookmaker, market_type, home_odd, away_odd,
+                                        home_opening_odd, away_opening_odd, home_opening_datetime,
+                                        away_opening_datetime, data_source)
+                        VALUES (:game_id, :bookmaker, :market_type, :home_odd, :away_odd,
+                               :home_opening_odd, :away_opening_odd, :home_opening_datetime,
+                               :away_opening_datetime, 'betexplorer')
+                        ON CONFLICT (game_id, bookmaker, market_type) DO UPDATE SET
+                            home_odd = EXCLUDED.home_odd,
+                            away_odd = EXCLUDED.away_odd;
+                        """
+                        
+                        conn.execute(text(odds_sql), {
+                            'game_id': game_id,
+                            'bookmaker': row['bookmaker'],
+                            'market_type': row['market_type'],
+                            'home_odd': float(row['odds_home_odd']) if pd.notna(row['odds_home_odd']) else None,
+                            'away_odd': float(row['odds_away_odd']) if pd.notna(row['odds_away_odd']) else None,
+                            'home_opening_odd': float(row['odds_home_opening_odd']) if pd.notna(row['odds_home_opening_odd']) else None,
+                            'away_opening_odd': float(row['odds_away_opening_odd']) if pd.notna(row['odds_away_opening_odd']) else None,
+                            'home_opening_datetime': pd.to_datetime(row['odds_home_opening_datetime']) if pd.notna(row['odds_home_opening_datetime']) else None,
+                            'away_opening_datetime': pd.to_datetime(row['odds_away_opening_datetime']) if pd.notna(row['odds_away_opening_datetime']) else None
+                        })
+                        
+                        # Insert betting URL
+                        if pd.notna(row.get('source_url')):
+                            url_sql = """
+                            INSERT INTO game_urls (game_id, url_type, url, source)
+                            VALUES (:game_id, 'betting', :url, 'betexplorer')
+                            ON CONFLICT (game_id, url_type, source) DO NOTHING;
+                            """
+                            conn.execute(text(url_sql), {
+                                'game_id': game_id,
+                                'url': row['source_url']
+                            })
+                        
+                        odds_imported += 1
+                        
+                    except Exception as e:
+                        logger.error(f"Error importing odds row: {e}")
+                        continue
+                
+                conn.commit()
+                logger.info(f"✅ Imported {odds_imported} odds records from {file_path}")
+                
+        except Exception as e:
+            logger.error(f"❌ Error importing odds data: {e}")
+    
+    def import_team_stats_data(self, file_path: str):
+        """Import team stats with enhanced team name resolution and better logging"""
+        
+        # Verify file integrity first
+        if not self.verify_file_integrity(file_path):
+            logger.error(f"Skipping import of {file_path} due to integrity issues")
+            return
+        
+        try:
+            df = pd.read_csv(file_path)
+            stats_imported = 0
+            stats_skipped = 0
+            
+            logger.info(f"📈 Starting import of {len(df)} team stats from {os.path.basename(file_path)}")
+            
+            with self.engine.connect() as conn:
+                for _, row in df.iterrows():
+                    try:
+                        # Clean team name (remove * and other suffixes)
+                        team_name = str(row.get('', '')).replace('*', '').strip()
+                        
+                        # For team stats, we use the season year to determine the correct team identity
+                        season = int(row['season'])
+                        # Convert season to approximate date (start of season)
+                        season_start_date = pd.to_datetime(f'{season-1}-10-01').date()
+                        
+                        team_id = self.get_team_id_for_date(team_name, season_start_date, conn)
+                        if not team_id:
+                            logger.debug(f"Team not found: {team_name} for season {season}")
+                            stats_skipped += 1
+                            continue
+                        
+                        stats_sql = """
+                        INSERT INTO team_stats (
+                            team_id, season, games_played, wins, losses, overtime_losses, points,
+                            points_percentage, goals_for, goals_against, shootout_wins, shootout_losses,
+                            srs, sos, goals_for_per_game, goals_against_per_game,
+                            power_play_goals, power_play_opportunities, power_play_percentage,
+                            penalty_kill_percentage, short_handed_goals, short_handed_goals_allowed,
+                            shots, shot_percentage, shots_against, save_percentage, shutouts,
+                            penalties_per_game, opponent_penalties_per_game, average_age
+                        )
+                        VALUES (
+                            :team_id, :season, :gp, :w, :l, :ol, :pts, :pts_pct, :gf, :ga, :sow, :sol,
+                            :srs, :sos, :gf_per_g, :ga_per_g, :pp, :ppo, :pp_pct, :pk_pct, :sh, :sha,
+                            :shots, :shot_pct, :sa, :sv_pct, :so, :pim_per_g, :opim_per_g, :avg_age
+                        )
+                        ON CONFLICT (team_id, season) DO UPDATE SET
+                            games_played = EXCLUDED.games_played,
+                            wins = EXCLUDED.wins,
+                            losses = EXCLUDED.losses,
+                            points = EXCLUDED.points;
+                        """
+                        
+                        conn.execute(text(stats_sql), {
+                            'team_id': team_id,
+                            'season': season,
+                            'gp': int(row['GP']) if pd.notna(row['GP']) else None,
+                            'w': int(row['W']) if pd.notna(row['W']) else None,
+                            'l': int(row['L']) if pd.notna(row['L']) else None,
+                            'ol': int(row['OL']) if pd.notna(row['OL']) else None,
+                            'pts': int(row['PTS']) if pd.notna(row['PTS']) else None,
+                            'pts_pct': float(row['PTS%']) if pd.notna(row['PTS%']) else None,
+                            'gf': int(row['GF']) if pd.notna(row['GF']) else None,
+                            'ga': int(row['GA']) if pd.notna(row['GA']) else None,
+                            'sow': int(row['SOW']) if pd.notna(row['SOW']) else None,
+                            'sol': int(row['SOL']) if pd.notna(row['SOL']) else None,
+                            'srs': float(row['SRS']) if pd.notna(row['SRS']) else None,
+                            'sos': float(row['SOS']) if pd.notna(row['SOS']) else None,
+                            'gf_per_g': float(row['GF/G']) if pd.notna(row['GF/G']) else None,
+                            'ga_per_g': float(row['GA/G']) if pd.notna(row['GA/G']) else None,
+                            'pp': int(row['PP']) if pd.notna(row['PP']) else None,
+                            'ppo': int(row['PPO']) if pd.notna(row['PPO']) else None,
+                            'pp_pct': float(row['PP%']) if pd.notna(row['PP%']) else None,
+                            'pk_pct': float(row['PK%']) if pd.notna(row['PK%']) else None,
+                            'sh': int(row['SH']) if pd.notna(row['SH']) else None,
+                            'sha': int(row['SHA']) if pd.notna(row['SHA']) else None,
+                            'shots': int(row['S']) if pd.notna(row['S']) else None,
+                            'shot_pct': float(row['S%']) if pd.notna(row['S%']) else None,
+                            'sa': int(row['SA']) if pd.notna(row['SA']) else None,
+                            'sv_pct': float(row['SV%']) if pd.notna(row['SV%']) else None,
+                            'so': int(row['SO']) if pd.notna(row['SO']) else None,
+                            'pim_per_g': float(row['PIM/G']) if pd.notna(row['PIM/G']) else None,
+                            'opim_per_g': float(row['oPIM/G']) if pd.notna(row['oPIM/G']) else None,
+                            'avg_age': float(row['AvAge']) if pd.notna(row['AvAge']) else None
+                        })
+                        
+                        stats_imported += 1
+                        
+                    except Exception as e:
+                        logger.error(f"Error importing team stats row: {e}")
+                        stats_skipped += 1
+                        continue
+                
+                conn.commit()
+                logger.info(f"✅ Team stats import completed:")
+                logger.info(f"  📊 Imported: {stats_imported} team stats")
+                logger.info(f"  ⚠️  Skipped: {stats_skipped} team stats")
+                logger.info(f"  📁 Source: {os.path.basename(file_path)}")
                 
         except Exception as e:
             logger.error(f"❌ Error importing team stats: {e}")
     
-    def _get_team_mapping(self) -> Dict[str, int]:
-        """Get mapping from team names to team IDs"""
-        
-        try:
-            with self.engine.connect() as conn:
-                result = conn.execute(text("SELECT id, name FROM teams"))
-                return {row[1]: row[0] for row in result.fetchall()}
-        except Exception as e:
-            logger.error(f"❌ Error getting team mapping: {e}")
-            return {}
-    
-    def _safe_int(self, value) -> Optional[int]:
-        """Safely convert value to int"""
-        try:
-            return int(value) if pd.notna(value) else None
-        except (ValueError, TypeError):
-            return None
-    
     def get_data_summary(self):
-        """Get summary of imported data with error handling"""
+        """Generate comprehensive data summary with franchise and venue info"""
         
         try:
             with self.engine.connect() as conn:
                 # Games summary
                 games_result = conn.execute(text("""
-                    SELECT 
-                        season,
-                        COUNT(*) as total_games,
-                        COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed_games,
-                        MIN(date) as first_game,
-                        MAX(date) as last_game
+                    SELECT season, COUNT(*) as total_games, 
+                           COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed_games,
+                           MIN(date) as first_game, MAX(date) as last_game
                     FROM games 
                     GROUP BY season 
                     ORDER BY season
@@ -522,12 +1338,92 @@ class DatabaseManager:
                 for row in games_result:
                     logger.info(f"  Season {row[0]}: {row[1]} total games, {row[2]} completed ({row[3]} to {row[4]})")
                 
-                # Teams summary
-                teams_result = conn.execute(text("SELECT COUNT(*) FROM teams"))
-                teams_count = teams_result.fetchone()[0]
-                logger.info(f"\n🏒 TEAMS: {teams_count} teams imported")
+                # Franchises and teams summary
+                franchise_result = conn.execute(text("""
+                    SELECT COUNT(*) as total_franchises,
+                           COUNT(CASE WHEN is_active = TRUE THEN 1 END) as active_franchises
+                    FROM franchises
+                """))
+                franchise_data = franchise_result.fetchone()
                 
-                # Team stats summary
+                teams_result = conn.execute(text("""
+                    SELECT COUNT(*) as total_teams,
+                           COUNT(CASE WHEN is_current = TRUE THEN 1 END) as current_teams,
+                           COUNT(CASE WHEN is_current = FALSE THEN 1 END) as historical_teams
+                    FROM teams
+                """))
+                teams_data = teams_result.fetchone()
+                
+                logger.info(f"\n🏒 FRANCHISES & TEAMS:")
+                logger.info(f"  {franchise_data[0]} total franchises ({franchise_data[1]} active)")
+                logger.info(f"  {teams_data[0]} total team identities ({teams_data[1]} current, {teams_data[2]} historical)")
+                
+                # Historical changes summary
+                history_result = conn.execute(text("""
+                    SELECT change_type, COUNT(*) as count
+                    FROM team_history 
+                    GROUP BY change_type
+                    ORDER BY count DESC
+                """))
+                
+                logger.info("\n📜 TEAM HISTORY:")
+                for row in history_result:
+                    logger.info(f"  {row[0]}: {row[1]} changes")
+                
+                # Key franchise transitions
+                utah_history = conn.execute(text("""
+                    SELECT 
+                        t_from.name as from_name,
+                        t_to.name as to_name,
+                        th.change_date,
+                        th.change_type
+                    FROM team_history th
+                    JOIN teams t_from ON th.from_team_id = t_from.id
+                    JOIN teams t_to ON th.to_team_id = t_to.id
+                    WHERE th.franchise_id = 23  -- Utah/Arizona franchise
+                    ORDER BY th.change_date
+                """))
+                
+                logger.info("\n🦣 UTAH MAMMOTH FRANCHISE HISTORY:")
+                for row in utah_history:
+                    logger.info(f"  {row[2]}: {row[0]} → {row[1]} ({row[3]})")
+                
+                # Venues summary
+                venues_result = conn.execute(text("""
+                    SELECT COUNT(*) as total_venues,
+                           COUNT(CASE WHEN is_active = TRUE THEN 1 END) as active_venues,
+                           COUNT(CASE WHEN venue_type = 'home' THEN 1 END) as home_venues
+                    FROM venues
+                """))
+                venues_data = venues_result.fetchone()
+                
+                logger.info(f"\n🏟️ VENUES:")
+                logger.info(f"  {venues_data[0]} total venues ({venues_data[1]} active, {venues_data[2]} home arenas)")
+                
+                # Odds summary
+                odds_result = conn.execute(text("""
+                    SELECT market_type, COUNT(*) as records, COUNT(DISTINCT bookmaker) as bookmakers
+                    FROM odds 
+                    GROUP BY market_type
+                """))
+                
+                logger.info("\n💰 ODDS SUMMARY:")
+                for row in odds_result:
+                    logger.info(f"  {row[0]}: {row[1]} records from {row[2]} bookmakers")
+                
+                # URLs summary
+                urls_result = conn.execute(text("""
+                    SELECT url_type, source, COUNT(*) as urls
+                    FROM game_urls
+                    GROUP BY url_type, source
+                    ORDER BY url_type, source
+                """))
+                
+                logger.info("\n🔗 URLS SUMMARY:")
+                for row in urls_result:
+                    logger.info(f"  {row[0]} ({row[1]}): {row[2]} URLs")
+                
+                # Team stats summary by season
                 stats_result = conn.execute(text("""
                     SELECT season, COUNT(*) as teams_with_stats
                     FROM team_stats 
@@ -543,43 +1439,76 @@ class DatabaseManager:
             logger.error(f"❌ Error generating summary: {e}")
 
 def main():
-    """Main function with better error handling"""
+    """Main function with better error handling and directory setup"""
     
     # Create logs directory
     os.makedirs('logs', exist_ok=True)
     
-    logger.info("🏒 Starting database setup and data import...")
+    logger.info("🏒 Starting NHL Database Setup with Directory-Aware File Import...")
+    logger.info("📂 Expected file locations:")
+    logger.info("  NHL Data: data/raw/nhl_games_*.csv, data/raw/nhl_team_stats_*.csv, data/raw/nhl_standings_*.csv")
+    logger.info("  Odds Data: data/odds/nhl_odds_*.csv")
     
     try:
         # Initialize database manager
         db_manager = DatabaseManager()
         
         # Create tables
-        logger.info("Creating database tables...")
+        logger.info("\n🔧 Creating database tables...")
         if not db_manager.create_tables():
             logger.error("❌ Failed to create tables. Please check permissions.")
             return
         
         # Insert initial data
-        logger.info("Inserting initial leagues and teams...")
+        logger.info("\n🏒 Inserting initial leagues, franchises and teams...")
         if not db_manager.insert_initial_data():
             logger.error("❌ Failed to insert initial data.")
             return
         
         # Import scraped data
-        logger.info("Importing scraped NHL data...")  
+        logger.info("\n📊 Importing scraped NHL data from directories...")  
         if not db_manager.import_scraped_data():
             logger.error("❌ Failed to import scraped data.")
+            logger.info("💡 Make sure your data files are in the correct directories:")
+            logger.info("   • NHL data: data/raw/")
+            logger.info("   • Odds data: data/odds/")
             return
         
         # Display summary
-        logger.info("Generating data summary...")
+        logger.info("\n📋 Generating data summary...")
         db_manager.get_data_summary()
         
-        logger.info("🎉 Database setup and import completed successfully!")
+        logger.info("\n" + "="*80)
+        logger.info("🎉 Database setup completed successfully!")
+        logger.info("📋 Summary of major improvements:")
+        logger.info("  ✅ Franchise-based team tracking with complete historical lineage")
+        logger.info("  ✅ Arizona Coyotes → Utah Mammoth transition properly modeled")
+        logger.info("  ✅ Venue tracking with placeholder arenas for all teams")
+        logger.info("  ✅ Datetime stored in Eastern Time format with timezone awareness")
+        logger.info("  ✅ Odds storage for moneyline 2-way markets with opening/current tracking")
+        logger.info("  ✅ Flexible URL storage for boxscore, betting, and additional game links")
+        logger.info("  ✅ Date-aware team name resolution (handles historical data correctly)")
+        logger.info("  ✅ Enhanced indexing and performance optimization")
+        logger.info("  ✅ Helper views and functions for easier data querying")
+        logger.info("  ✅ Directory-aware file import (data/raw/ and data/odds/)")
+        
+        logger.info("\n🔧 Database is ready for:")
+        logger.info("  • Historical data import from any NHL season")
+        logger.info("  • Future team relocations/name changes")
+        logger.info("  • Multi-venue game tracking (outdoor games, neutral sites)")
+        logger.info("  • Advanced betting market support")
+        logger.info("  • ML model predictions and value bet calculations")
+        logger.info("="*80)
         
     except Exception as e:
         logger.error(f"❌ Database setup failed: {e}")
+        logger.info("\n💡 Troubleshooting tips:")
+        logger.info("  1. Check database connection settings in .env file")
+        logger.info("  2. Ensure data files are in correct directories:")
+        logger.info("     • data/raw/ for NHL games, team stats, standings")
+        logger.info("     • data/odds/ for betting odds files")
+        logger.info("  3. Verify file naming follows pattern: nhl_*_YYYYMMDD-HHMMSS.csv")
+        logger.info("  4. Check database permissions and disk space")
         raise
 
 if __name__ == "__main__":
