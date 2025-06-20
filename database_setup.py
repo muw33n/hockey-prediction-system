@@ -5,6 +5,7 @@ Database setup with updated schema for:
 - Datetime with timezone support
 - Odds storage for moneyline 2-way
 - URL storage for additional game information
+- FIXED: Team name column detection for imports
 """
 
 import pandas as pd
@@ -111,12 +112,12 @@ class DatabaseManager:
         """Extract timestamp from filename for sorting and logging"""
         
         try:
-            # Extract timestamp from pattern like: nhl_games_20250616-190551.csv
+            # Extract timestamp from pattern like: nhl_games_20250616_190551.csv
             import re
-            match = re.search(r'_(\d{8}-\d{6})\.csv$', os.path.basename(filename))
+            match = re.search(r'_(\d{8}_\d{6})\.csv$', os.path.basename(filename))
             if match:
                 timestamp_str = match.group(1)
-                # Convert to readable format: 20250616-190551 -> 2025-06-16 19:05:51
+                # Convert to readable format: 20250616_190551 -> 2025-06-16 19:05:51
                 date_part = timestamp_str[:8]
                 time_part = timestamp_str[9:]
                 formatted_date = f"{date_part[:4]}-{date_part[4:6]}-{date_part[6:8]}"
@@ -163,10 +164,8 @@ class DatabaseManager:
         DROP TABLE IF EXISTS player_stats CASCADE;
         DROP TABLE IF EXISTS team_stats CASCADE;
         DROP TABLE IF EXISTS games CASCADE;
-        DROP TABLE IF EXISTS team_venues CASCADE;
         DROP TABLE IF EXISTS team_history CASCADE;
         DROP TABLE IF EXISTS teams CASCADE;
-        DROP TABLE IF EXISTS venue_history CASCADE;
         DROP TABLE IF EXISTS venues CASCADE;
         DROP TABLE IF EXISTS franchises CASCADE;
         DROP TABLE IF EXISTS leagues CASCADE;
@@ -193,34 +192,16 @@ class DatabaseManager:
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         
-        -- Venues/Stadiums table
+        -- Simplified venues table (to be populated in future)
         CREATE TABLE venues (
             id SERIAL PRIMARY KEY,
             name VARCHAR(100) NOT NULL,
             city VARCHAR(100),
-            state_province VARCHAR(50),
             country VARCHAR(50),
-            address TEXT,
             capacity INTEGER,
-            opened_date DATE,
-            closed_date DATE,
-            surface_type VARCHAR(50),
-            venue_type VARCHAR(50), -- home, neutral, outdoor, international
             latitude DECIMAL(10,8),
             longitude DECIMAL(11,8),
             is_active BOOLEAN DEFAULT TRUE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        
-        -- Venue history - tracks name changes, renovations
-        CREATE TABLE venue_history (
-            id SERIAL PRIMARY KEY,
-            venue_id INTEGER REFERENCES venues(id) ON DELETE CASCADE,
-            name VARCHAR(100) NOT NULL,
-            capacity INTEGER,
-            effective_from DATE NOT NULL,
-            effective_to DATE,
-            change_reason VARCHAR(100),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         
@@ -259,19 +240,7 @@ class DatabaseManager:
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         
-        -- Team-venue relationships
-        CREATE TABLE team_venues (
-            id SERIAL PRIMARY KEY,
-            team_id INTEGER REFERENCES teams(id),
-            venue_id INTEGER REFERENCES venues(id),
-            started_playing DATE NOT NULL,
-            stopped_playing DATE,
-            is_primary_venue BOOLEAN DEFAULT TRUE,
-            relationship_type VARCHAR(50), -- home, temporary, neutral
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        
-        -- Games table with venue reference and datetime timezone support
+        -- Games table with simplified venue reference
         CREATE TABLE games (
             id SERIAL PRIMARY KEY,
             date DATE NOT NULL,
@@ -281,7 +250,7 @@ class DatabaseManager:
             league_id INTEGER REFERENCES leagues(id),
             home_team_id INTEGER REFERENCES teams(id),
             away_team_id INTEGER REFERENCES teams(id),
-            venue_id INTEGER REFERENCES venues(id), -- NEW: Where the game was played
+            venue_id INTEGER REFERENCES venues(id), -- Will be populated in future
             home_score INTEGER,
             away_score INTEGER,
             overtime_shootout VARCHAR(20),
@@ -463,7 +432,7 @@ class DatabaseManager:
         CREATE INDEX idx_teams_current ON teams(is_current) WHERE is_current = TRUE;
         CREATE INDEX idx_team_history_franchise ON team_history(franchise_id);
         CREATE INDEX idx_team_history_date ON team_history(change_date);
-        CREATE INDEX idx_venue_history_dates ON venue_history(venue_id, effective_from, effective_to);
+        CREATE INDEX idx_venues_active ON venues(is_active) WHERE is_active = TRUE;
         
         -- Helper views for easier querying
         CREATE VIEW current_teams AS
@@ -672,6 +641,61 @@ class DatabaseManager:
             logger.error(f"❌ Error inserting initial data: {e}")
             return False
     
+    def detect_team_name_column(self, df: pd.DataFrame) -> str:
+        """
+        Automatically detect the column containing team names
+        """
+        # Common column names for team names
+        team_column_candidates = [
+            'Team',  # Most common
+            '',      # Unnamed first column
+            ':',     # Hockey Reference format (based on CSV info)
+            'team',
+            'Team Name',
+            'Tm'
+        ]
+        
+        # Check each candidate
+        for col_name in team_column_candidates:
+            if col_name in df.columns:
+                # Verify it contains team-like data
+                sample_values = df[col_name].dropna().astype(str).str.strip()
+                sample_values = sample_values[sample_values != '']
+                
+                if len(sample_values) > 0:
+                    # Check if values look like team names
+                    first_value = sample_values.iloc[0]
+                    if len(first_value) > 2 and not first_value.isdigit():
+                        logger.info(f"🎯 Detected team name column: '{col_name}'")
+                        logger.info(f"   Sample values: {list(sample_values.head(3))}")
+                        return col_name
+        
+        # If no match found, try to find any string column with reasonable values
+        logger.warning("⚠️ Standard team name columns not found, attempting auto-detection...")
+        
+        for col_name in df.columns:
+            if df[col_name].dtype == 'object':  # String column
+                sample_values = df[col_name].dropna().astype(str).str.strip()
+                sample_values = sample_values[sample_values != '']
+                
+                if len(sample_values) > 0:
+                    first_value = sample_values.iloc[0]
+                    # Look for NHL team patterns
+                    nhl_indicators = ['Bruins', 'Rangers', 'Kings', 'Wings', 'Leafs', 'Flames', 'Stars', 'Wild']
+                    if any(indicator in first_value for indicator in nhl_indicators):
+                        logger.info(f"🎯 Auto-detected team name column: '{col_name}'")
+                        logger.info(f"   Sample values: {list(sample_values.head(3))}")
+                        return col_name
+        
+        # Fallback - use first string column
+        string_columns = df.select_dtypes(include=['object']).columns.tolist()
+        if string_columns:
+            fallback_col = string_columns[0]
+            logger.warning(f"⚠️ Using fallback column: '{fallback_col}'")
+            return fallback_col
+        
+        raise ValueError("❌ Could not detect team name column in CSV")
+    
     def get_team_id_for_date(self, team_name: str, game_date: str, conn) -> Optional[int]:
         """Get team ID for a specific date, handling historical team changes"""
         
@@ -791,12 +815,12 @@ class DatabaseManager:
                 def extract_sort_key(filename):
                     try:
                         import re
-                        match = re.search(r'_(\d{8}-\d{6})\.csv$', os.path.basename(filename))
+                        match = re.search(r'_(\d{8}_\d{6})\.csv$', os.path.basename(filename))
                         if match:
                             return match.group(1)
-                        return "00000000-000000"
+                        return "00000000_000000"
                     except Exception:
-                        return "00000000-000000"
+                        return "00000000_000000"
                 
                 odds_files.sort(key=extract_sort_key, reverse=True)
                 logger.info(f"📊 Found {len(odds_files)} odds files in {self.data_paths['odds_data']}")
@@ -825,7 +849,7 @@ class DatabaseManager:
             else:
                 search_dir = self.data_paths['nhl_data']
             
-            # Pattern: nhl_games_20250616-190551.csv
+            # Pattern: nhl_games_20250616_190551.csv
             pattern = os.path.join(search_dir, f"{base_name}_*.csv")
             files = glob.glob(pattern)
             
@@ -837,13 +861,13 @@ class DatabaseManager:
             def extract_sort_key(filename):
                 try:
                     import re
-                    match = re.search(r'_(\d{8}-\d{6})\.csv$', os.path.basename(filename))
+                    match = re.search(r'_(\d{8}_\d{6})\.csv$', os.path.basename(filename))
                     if match:
                         # Return timestamp as sortable string: 20250616-190551
                         return match.group(1)
-                    return "00000000-000000"  # Fallback for files without timestamp
+                    return "00000000_000000"  # Fallback for files without timestamp
                 except Exception:
-                    return "00000000-000000"
+                    return "00000000_000000"
             
             files.sort(key=extract_sort_key, reverse=True)  # Most recent first
             
@@ -895,17 +919,25 @@ class DatabaseManager:
             return False
     
     def import_standings_data(self, file_path: str):
-        """Import standings data (similar structure to team_stats)"""
+        """Import standings data (similar structure to team_stats) with automatic team column detection"""
         
         try:
             df = pd.read_csv(file_path)
+            
+            # Detect team name column automatically
+            team_column = self.detect_team_name_column(df)
+            
             standings_imported = 0
             
             with self.engine.connect() as conn:
                 for _, row in df.iterrows():
                     try:
                         # Clean team name (remove * and other suffixes)
-                        team_name = str(row.get('', '')).replace('*', '').strip()
+                        team_name = str(row.get(team_column, '')).replace('*', '').strip()
+                        
+                        if not team_name:
+                            logger.debug(f"Empty team name in row, skipping")
+                            continue
                         
                         # For standings, we use the season year to determine the correct team identity
                         season = int(row['season'])
@@ -967,7 +999,7 @@ class DatabaseManager:
             logger.error(f"❌ Error importing standings data: {e}")
     
     def import_games_data(self, file_path: str):
-        """Import games data with enhanced team and venue handling"""
+        """Import games data with simplified venue handling"""
         
         # Verify file integrity first
         if not self.verify_file_integrity(file_path):
@@ -998,18 +1030,14 @@ class DatabaseManager:
                         # Handle datetime - convert to datetime object if it's string
                         datetime_et = pd.to_datetime(row.get('datetime')) if pd.notna(row.get('datetime')) else None
                         
-                        # Get or create venue (for now, we'll create placeholder venues)
-                        venue_id = self.get_or_create_home_venue(home_team_id, conn)
-                        
-                        # Insert game
+                        # Insert game (venue_id will be NULL for now, to be populated later)
                         game_sql = """
                         INSERT INTO games (date, datetime_et, season, league_id, home_team_id, away_team_id,
                                          venue_id, home_score, away_score, overtime_shootout, status, data_source)
                         VALUES (:date, :datetime_et, :season, 1, :home_team_id, :away_team_id,
-                               :venue_id, :home_score, :away_score, :overtime_shootout, :status, 'hockey-reference')
+                               NULL, :home_score, :away_score, :overtime_shootout, :status, 'hockey-reference')
                         ON CONFLICT (date, home_team_id, away_team_id) DO UPDATE SET
                             datetime_et = EXCLUDED.datetime_et,
-                            venue_id = EXCLUDED.venue_id,
                             home_score = EXCLUDED.home_score,
                             away_score = EXCLUDED.away_score,
                             status = EXCLUDED.status
@@ -1022,7 +1050,6 @@ class DatabaseManager:
                             'season': int(row['season']),
                             'home_team_id': home_team_id,
                             'away_team_id': away_team_id,
-                            'venue_id': venue_id,
                             'home_score': int(row['home_score']) if pd.notna(row['home_score']) else None,
                             'away_score': int(row['visitor_score']) if pd.notna(row['visitor_score']) else None,
                             'overtime_shootout': row.get('overtime_shootout'),
@@ -1061,69 +1088,10 @@ class DatabaseManager:
                 logger.info(f"  📊 Imported: {games_imported} games")
                 logger.info(f"  ⚠️  Skipped: {games_skipped} games")
                 logger.info(f"  📁 Source: {os.path.basename(file_path)}")
+                logger.info(f"  🏟️  Venue assignment: Will be added in future")
                 
         except Exception as e:
             logger.error(f"❌ Error importing games data: {e}")
-    
-    def get_or_create_home_venue(self, team_id: int, conn) -> int:
-        """Get or create a placeholder venue for the home team"""
-        
-        # Check if venue already exists for this team
-        venue_check_sql = """
-        SELECT v.id FROM venues v
-        JOIN team_venues tv ON v.id = tv.venue_id
-        WHERE tv.team_id = :team_id AND tv.is_primary_venue = TRUE
-        LIMIT 1;
-        """
-        
-        result = conn.execute(text(venue_check_sql), {'team_id': team_id})
-        existing_venue = result.fetchone()
-        
-        if existing_venue:
-            return existing_venue[0]
-        
-        # Get team info for venue creation
-        team_info_sql = """
-        SELECT name, city FROM teams WHERE id = :team_id;
-        """
-        
-        result = conn.execute(text(team_info_sql), {'team_id': team_id})
-        team_info = result.fetchone()
-        
-        if not team_info:
-            logger.error(f"Team not found for ID: {team_id}")
-            return None
-        
-        team_name, city = team_info
-        
-        # Create placeholder venue
-        venue_sql = """
-        INSERT INTO venues (name, city, venue_type, is_active)
-        VALUES (:name, :city, 'home', TRUE)
-        RETURNING id;
-        """
-        
-        venue_name = f"{team_name} Home Arena"
-        result = conn.execute(text(venue_sql), {
-            'name': venue_name,
-            'city': city
-        })
-        
-        venue_id = result.fetchone()[0]
-        
-        # Link team to venue
-        team_venue_sql = """
-        INSERT INTO team_venues (team_id, venue_id, started_playing, is_primary_venue, relationship_type)
-        VALUES (:team_id, :venue_id, CURRENT_DATE, TRUE, 'home');
-        """
-        
-        conn.execute(text(team_venue_sql), {
-            'team_id': team_id,
-            'venue_id': venue_id
-        })
-        
-        logger.info(f"Created placeholder venue: {venue_name}")
-        return venue_id
     
     def import_odds_data(self, file_path: str):
         """Import odds data with enhanced team name resolution"""
@@ -1217,7 +1185,7 @@ class DatabaseManager:
             logger.error(f"❌ Error importing odds data: {e}")
     
     def import_team_stats_data(self, file_path: str):
-        """Import team stats with enhanced team name resolution and better logging"""
+        """Import team stats with enhanced team name resolution and automatic column detection"""
         
         # Verify file integrity first
         if not self.verify_file_integrity(file_path):
@@ -1226,16 +1194,26 @@ class DatabaseManager:
         
         try:
             df = pd.read_csv(file_path)
+            
+            # Detect team name column automatically
+            team_column = self.detect_team_name_column(df)
+            
             stats_imported = 0
             stats_skipped = 0
             
             logger.info(f"📈 Starting import of {len(df)} team stats from {os.path.basename(file_path)}")
+            logger.info(f"🎯 Using team name column: '{team_column}'")
             
             with self.engine.connect() as conn:
                 for _, row in df.iterrows():
                     try:
                         # Clean team name (remove * and other suffixes)
-                        team_name = str(row.get('', '')).replace('*', '').strip()
+                        team_name = str(row.get(team_column, '')).replace('*', '').strip()
+                        
+                        if not team_name:
+                            logger.debug(f"Empty team name in row, skipping")
+                            stats_skipped += 1
+                            continue
                         
                         # For team stats, we use the season year to determine the correct team identity
                         season = int(row['season'])
@@ -1320,7 +1298,7 @@ class DatabaseManager:
             logger.error(f"❌ Error importing team stats: {e}")
     
     def get_data_summary(self):
-        """Generate comprehensive data summary with franchise and venue info"""
+        """Generate comprehensive data summary with franchise info"""
         
         try:
             with self.engine.connect() as conn:
@@ -1337,6 +1315,16 @@ class DatabaseManager:
                 logger.info("\n📊 GAMES SUMMARY:")
                 for row in games_result:
                     logger.info(f"  Season {row[0]}: {row[1]} total games, {row[2]} completed ({row[3]} to {row[4]})")
+                
+                # Venue assignment summary
+                games_with_venues = conn.execute(text("""
+                    SELECT COUNT(*) FROM games WHERE venue_id IS NOT NULL
+                """)).fetchone()[0]
+                total_games = conn.execute(text("SELECT COUNT(*) FROM games")).fetchone()[0]
+                
+                logger.info(f"\n🏟️ VENUE ASSIGNMENT:")
+                logger.info(f"  Games with venue assigned: {games_with_venues}/{total_games}")
+                logger.info(f"  Venue assignment: To be completed in future")
                 
                 # Franchises and teams summary
                 franchise_result = conn.execute(text("""
@@ -1387,18 +1375,6 @@ class DatabaseManager:
                 logger.info("\n🦣 UTAH MAMMOTH FRANCHISE HISTORY:")
                 for row in utah_history:
                     logger.info(f"  {row[2]}: {row[0]} → {row[1]} ({row[3]})")
-                
-                # Venues summary
-                venues_result = conn.execute(text("""
-                    SELECT COUNT(*) as total_venues,
-                           COUNT(CASE WHEN is_active = TRUE THEN 1 END) as active_venues,
-                           COUNT(CASE WHEN venue_type = 'home' THEN 1 END) as home_venues
-                    FROM venues
-                """))
-                venues_data = venues_result.fetchone()
-                
-                logger.info(f"\n🏟️ VENUES:")
-                logger.info(f"  {venues_data[0]} total venues ({venues_data[1]} active, {venues_data[2]} home arenas)")
                 
                 # Odds summary
                 odds_result = conn.execute(text("""
@@ -1483,7 +1459,7 @@ def main():
         logger.info("📋 Summary of major improvements:")
         logger.info("  ✅ Franchise-based team tracking with complete historical lineage")
         logger.info("  ✅ Arizona Coyotes → Utah Mammoth transition properly modeled")
-        logger.info("  ✅ Venue tracking with placeholder arenas for all teams")
+        logger.info("  ✅ Simplified venue structure (venue assignment to be completed later)")
         logger.info("  ✅ Datetime stored in Eastern Time format with timezone awareness")
         logger.info("  ✅ Odds storage for moneyline 2-way markets with opening/current tracking")
         logger.info("  ✅ Flexible URL storage for boxscore, betting, and additional game links")
@@ -1491,11 +1467,12 @@ def main():
         logger.info("  ✅ Enhanced indexing and performance optimization")
         logger.info("  ✅ Helper views and functions for easier data querying")
         logger.info("  ✅ Directory-aware file import (data/raw/ and data/odds/)")
+        logger.info("  ✅ FIXED: Automatic team name column detection for CSV imports")
         
         logger.info("\n🔧 Database is ready for:")
         logger.info("  • Historical data import from any NHL season")
         logger.info("  • Future team relocations/name changes")
-        logger.info("  • Multi-venue game tracking (outdoor games, neutral sites)")
+        logger.info("  • Venue data population and assignment")
         logger.info("  • Advanced betting market support")
         logger.info("  • ML model predictions and value bet calculations")
         logger.info("="*80)
