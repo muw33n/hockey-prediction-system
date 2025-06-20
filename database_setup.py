@@ -7,6 +7,10 @@ Database setup with updated schema for:
 - URL storage for additional game information
 - FIXED: Team name column detection for imports
 - IMPROVED: Hierarchical import strategy (eliminates data duplication)
+- ENHANCED: Timezone conversion for Betexplorer odds (CET→ET)
+
+Requirements:
+pip install pandas psycopg2-binary sqlalchemy python-dotenv pytz
 """
 
 import pandas as pd
@@ -1278,95 +1282,304 @@ class DatabaseManager:
             logger.error(f"❌ Error importing games data: {e}")
     
     def import_odds_data(self, file_path: str):
-        """Import odds data with enhanced team name resolution"""
+        """Import odds data with timezone conversion (CET→ET) and enhanced matching"""
         
         try:
             df = pd.read_csv(file_path)
             odds_imported = 0
+            odds_skipped_teams = 0
+            odds_skipped_games = 0
+            
+            logger.info(f"💰 Starting odds import from {os.path.basename(file_path)}")
+            logger.info(f"📊 Processing {len(df)} odds records...")
             
             with self.engine.connect() as conn:
-                for _, row in df.iterrows():
+                for index, row in df.iterrows():
                     try:
                         # Get game date for team lookup
-                        game_date = pd.to_datetime(row['match_datetime']).date()
+                        match_datetime_str = row['match_datetime']
+                        
+                        # Parse datetime from CSV (assumes CET/CEST timezone)
+                        match_datetime_cet = pd.to_datetime(match_datetime_str)
+                        
+                        # Convert from Central European Time to Eastern Time
+                        # CET/CEST is GMT+1/+2, EST/EDT is GMT-5/-4
+                        # So we need to subtract 6-7 hours
+                        match_datetime_et = self.convert_cet_to_et(match_datetime_cet)
+                        
+                        game_date = match_datetime_et.date()
                         
                         # Get team IDs using date-aware lookup
                         home_team_id = self.get_team_id_for_date(row['home_team'], game_date, conn)
                         away_team_id = self.get_team_id_for_date(row['away_team'], game_date, conn)
                         
                         if not home_team_id or not away_team_id:
+                            logger.debug(f"Teams not found: {row['home_team']} vs {row['away_team']} for {game_date}")
+                            odds_skipped_teams += 1
                             continue
                         
-                        # Find matching game
-                        datetime_match = pd.to_datetime(row['match_datetime'])
-                        game_sql = """
-                        SELECT id FROM games 
-                        WHERE home_team_id = :home_team_id 
-                          AND away_team_id = :away_team_id
-                          AND ABS(EXTRACT(EPOCH FROM (datetime_et - :match_datetime))) < 3600
-                        LIMIT 1;
-                        """
+                        # Find matching game with wider tolerance window
+                        game_id = self.find_matching_game(
+                            conn, home_team_id, away_team_id, match_datetime_et
+                        )
                         
-                        game_result = conn.execute(text(game_sql), {
-                            'home_team_id': home_team_id,
-                            'away_team_id': away_team_id,
-                            'match_datetime': datetime_match
-                        })
-                        
-                        game_row = game_result.fetchone()
-                        if not game_row:
+                        if not game_id:
+                            logger.debug(f"No matching game found for {row['home_team']} vs {row['away_team']} at {match_datetime_et}")
+                            odds_skipped_games += 1
                             continue
                         
-                        game_id = game_row[0]
-                        
-                        # Insert odds
-                        odds_sql = """
-                        INSERT INTO odds (game_id, bookmaker, market_type, home_odd, away_odd,
-                                        home_opening_odd, away_opening_odd, home_opening_datetime,
-                                        away_opening_datetime, data_source)
-                        VALUES (:game_id, :bookmaker, :market_type, :home_odd, :away_odd,
-                               :home_opening_odd, :away_opening_odd, :home_opening_datetime,
-                               :away_opening_datetime, 'betexplorer')
-                        ON CONFLICT (game_id, bookmaker, market_type) DO UPDATE SET
-                            home_odd = EXCLUDED.home_odd,
-                            away_odd = EXCLUDED.away_odd;
-                        """
-                        
-                        conn.execute(text(odds_sql), {
-                            'game_id': game_id,
-                            'bookmaker': row['bookmaker'],
-                            'market_type': row['market_type'],
-                            'home_odd': float(row['odds_home_odd']) if pd.notna(row['odds_home_odd']) else None,
-                            'away_odd': float(row['odds_away_odd']) if pd.notna(row['odds_away_odd']) else None,
-                            'home_opening_odd': float(row['odds_home_opening_odd']) if pd.notna(row['odds_home_opening_odd']) else None,
-                            'away_opening_odd': float(row['odds_away_opening_odd']) if pd.notna(row['odds_away_opening_odd']) else None,
-                            'home_opening_datetime': pd.to_datetime(row['odds_home_opening_datetime']) if pd.notna(row['odds_home_opening_datetime']) else None,
-                            'away_opening_datetime': pd.to_datetime(row['odds_away_opening_datetime']) if pd.notna(row['odds_away_opening_datetime']) else None
-                        })
+                        # Insert odds with timezone-corrected datetimes
+                        self.insert_odds_record(conn, row, game_id, match_datetime_et)
                         
                         # Insert betting URL
                         if pd.notna(row.get('source_url')):
-                            url_sql = """
-                            INSERT INTO game_urls (game_id, url_type, url, source)
-                            VALUES (:game_id, 'betting', :url, 'betexplorer')
-                            ON CONFLICT (game_id, url_type, source) DO NOTHING;
-                            """
-                            conn.execute(text(url_sql), {
-                                'game_id': game_id,
-                                'url': row['source_url']
-                            })
+                            self.insert_betting_url(conn, game_id, row['source_url'])
                         
                         odds_imported += 1
                         
+                        # Progress logging every 50 records
+                        if odds_imported % 50 == 0:
+                            logger.info(f"  📈 Progress: {odds_imported} odds imported...")
+                        
                     except Exception as e:
-                        logger.error(f"Error importing odds row: {e}")
+                        logger.error(f"Error importing odds row {index}: {e}")
+                        logger.debug(f"Problematic row data: {dict(row)}")
                         continue
                 
                 conn.commit()
-                logger.info(f"✅ Imported {odds_imported} odds records from {file_path}")
+                
+                # Import summary
+                total_processed = odds_imported + odds_skipped_teams + odds_skipped_games
+                logger.info(f"✅ Odds import completed:")
+                logger.info(f"  📊 Processed: {total_processed} records")
+                logger.info(f"  💰 Imported: {odds_imported} odds")
+                logger.info(f"  ⚠️  Skipped (teams not found): {odds_skipped_teams}")
+                logger.info(f"  ⚠️  Skipped (games not matched): {odds_skipped_games}")
+                logger.info(f"  📁 Source: {os.path.basename(file_path)}")
+                logger.info(f"  🌍 Timezone: CET/CEST → Eastern Time conversion applied")
+                
+                if odds_skipped_games > 0:
+                    self.log_sample_unmatched_games(conn, df.head(10))
                 
         except Exception as e:
             logger.error(f"❌ Error importing odds data: {e}")
+
+    def convert_cet_to_et(self, cet_datetime):
+        """
+        Convert Central European Time to Eastern Time
+        
+        Args:
+            cet_datetime: datetime object in CET/CEST timezone
+            
+        Returns:
+            datetime object converted to Eastern Time
+        """
+        try:
+            import pytz
+            
+            # Define timezones
+            cet_tz = pytz.timezone('Europe/Prague')  # CET/CEST
+            et_tz = pytz.timezone('US/Eastern')      # EST/EDT
+            
+            # If datetime is naive, assume it's in CET
+            if cet_datetime.tzinfo is None:
+                cet_datetime = cet_tz.localize(cet_datetime)
+            
+            # Convert to Eastern Time
+            et_datetime = cet_datetime.astimezone(et_tz)
+            
+            # Return as naive datetime (matching database storage)
+            return et_datetime.replace(tzinfo=None)
+            
+        except Exception as e:
+            logger.warning(f"Timezone conversion failed: {e}, using offset approximation")
+            # Fallback: simple 6-hour offset (CET is typically UTC+1, ET is UTC-5)
+            return cet_datetime - pd.Timedelta(hours=6)
+
+    def find_matching_game(self, conn, home_team_id: int, away_team_id: int, match_datetime_et):
+        """
+        Find matching game with enhanced tolerance and multiple matching strategies
+        
+        Args:
+            conn: Database connection
+            home_team_id: Home team ID
+            away_team_id: Away team ID  
+            match_datetime_et: Match datetime in Eastern Time
+            
+        Returns:
+            game_id if found, None otherwise
+        """
+        
+        # Strategy 1: Exact datetime match (±1 hour)
+        game_sql_exact = """
+        SELECT id, datetime_et, 
+               ABS(EXTRACT(EPOCH FROM (datetime_et - :match_datetime))) as time_diff_seconds
+        FROM games 
+        WHERE home_team_id = :home_team_id 
+          AND away_team_id = :away_team_id
+          AND ABS(EXTRACT(EPOCH FROM (datetime_et - :match_datetime))) < 3600
+        ORDER BY time_diff_seconds
+        LIMIT 1;
+        """
+        
+        result = conn.execute(text(game_sql_exact), {
+            'home_team_id': home_team_id,
+            'away_team_id': away_team_id,
+            'match_datetime': match_datetime_et
+        })
+        
+        game_row = result.fetchone()
+        if game_row:
+            logger.debug(f"Found exact match: game_id={game_row[0]}, time_diff={game_row[2]:.0f}s")
+            return game_row[0]
+        
+        # Strategy 2: Same date match (±12 hours) 
+        game_sql_date = """
+        SELECT id, datetime_et,
+               ABS(EXTRACT(EPOCH FROM (datetime_et - :match_datetime))) as time_diff_seconds
+        FROM games 
+        WHERE home_team_id = :home_team_id 
+          AND away_team_id = :away_team_id
+          AND ABS(EXTRACT(EPOCH FROM (datetime_et - :match_datetime))) < 43200
+        ORDER BY time_diff_seconds
+        LIMIT 1;
+        """
+        
+        result = conn.execute(text(game_sql_date), {
+            'home_team_id': home_team_id,
+            'away_team_id': away_team_id,
+            'match_datetime': match_datetime_et
+        })
+        
+        game_row = result.fetchone()
+        if game_row:
+            time_diff_hours = game_row[2] / 3600
+            logger.debug(f"Found date match: game_id={game_row[0]}, time_diff={time_diff_hours:.1f}h")
+            return game_row[0]
+        
+        # Strategy 3: Date-only match (ignore time completely)
+        game_date = match_datetime_et.date()
+        game_sql_dateonly = """
+        SELECT id, datetime_et
+        FROM games 
+        WHERE home_team_id = :home_team_id 
+          AND away_team_id = :away_team_id
+          AND date = :game_date
+        LIMIT 1;
+        """
+        
+        result = conn.execute(text(game_sql_dateonly), {
+            'home_team_id': home_team_id,
+            'away_team_id': away_team_id,
+            'game_date': game_date
+        })
+        
+        game_row = result.fetchone()
+        if game_row:
+            logger.debug(f"Found date-only match: game_id={game_row[0]}")
+            return game_row[0]
+        
+        return None
+
+    def insert_odds_record(self, conn, row, game_id: int, match_datetime_et):
+        """Insert odds record with proper timezone handling"""
+        
+        odds_sql = """
+        INSERT INTO odds (game_id, bookmaker, market_type, home_odd, away_odd,
+                        home_opening_odd, away_opening_odd, home_opening_datetime,
+                        away_opening_datetime, data_source)
+        VALUES (:game_id, :bookmaker, :market_type, :home_odd, :away_odd,
+               :home_opening_odd, :away_opening_odd, :home_opening_datetime,
+               :away_opening_datetime, 'betexplorer')
+        ON CONFLICT (game_id, bookmaker, market_type) DO UPDATE SET
+            home_odd = EXCLUDED.home_odd,
+            away_odd = EXCLUDED.away_odd,
+            home_opening_odd = EXCLUDED.home_opening_odd,
+            away_opening_odd = EXCLUDED.away_opening_odd;
+        """
+        
+        # Convert opening datetimes from CET to ET if they exist
+        home_opening_datetime = None
+        away_opening_datetime = None
+        
+        if pd.notna(row.get('odds_home_opening_datetime')):
+            home_opening_cet = pd.to_datetime(row['odds_home_opening_datetime'])
+            home_opening_datetime = self.convert_cet_to_et(home_opening_cet)
+        
+        if pd.notna(row.get('odds_away_opening_datetime')):
+            away_opening_cet = pd.to_datetime(row['odds_away_opening_datetime'])
+            away_opening_datetime = self.convert_cet_to_et(away_opening_cet)
+        
+        conn.execute(text(odds_sql), {
+            'game_id': game_id,
+            'bookmaker': row['bookmaker'],
+            'market_type': row['market_type'],
+            'home_odd': float(row['odds_home_odd']) if pd.notna(row['odds_home_odd']) else None,
+            'away_odd': float(row['odds_away_odd']) if pd.notna(row['odds_away_odd']) else None,
+            'home_opening_odd': float(row['odds_home_opening_odd']) if pd.notna(row['odds_home_opening_odd']) else None,
+            'away_opening_odd': float(row['odds_away_opening_odd']) if pd.notna(row['odds_away_opening_odd']) else None,
+            'home_opening_datetime': home_opening_datetime,
+            'away_opening_datetime': away_opening_datetime
+        })
+
+    def insert_betting_url(self, conn, game_id: int, source_url: str):
+        """Insert betting URL for game"""
+        
+        url_sql = """
+        INSERT INTO game_urls (game_id, url_type, url, source)
+        VALUES (:game_id, 'betting', :url, 'betexplorer')
+        ON CONFLICT (game_id, url_type, source) DO NOTHING;
+        """
+        
+        conn.execute(text(url_sql), {
+            'game_id': game_id,
+            'url': source_url
+        })
+
+    def log_sample_unmatched_games(self, conn, sample_df):
+        """Log sample of unmatched games for debugging"""
+        
+        logger.info("🔍 Sample unmatched games (for debugging):")
+        
+        for _, row in sample_df.iterrows():
+            try:
+                match_datetime_cet = pd.to_datetime(row['match_datetime'])
+                match_datetime_et = self.convert_cet_to_et(match_datetime_cet)
+                
+                # Check what games exist for these teams around this time
+                games_sql = """
+                SELECT date, datetime_et, home_score, away_score
+                FROM games g
+                JOIN teams ht ON g.home_team_id = ht.id 
+                JOIN teams at ON g.away_team_id = at.id
+                WHERE ht.name LIKE :home_team_pattern
+                  AND at.name LIKE :away_team_pattern
+                  AND ABS(EXTRACT(EPOCH FROM (g.datetime_et - :match_datetime))) < 86400
+                ORDER BY ABS(EXTRACT(EPOCH FROM (g.datetime_et - :match_datetime)))
+                LIMIT 3;
+                """
+                
+                result = conn.execute(text(games_sql), {
+                    'home_team_pattern': f"%{row['home_team'][:10]}%",
+                    'away_team_pattern': f"%{row['away_team'][:10]}%", 
+                    'match_datetime': match_datetime_et
+                })
+                
+                games = result.fetchall()
+                
+                logger.info(f"  🔍 {row['home_team']} vs {row['away_team']}")
+                logger.info(f"     CET: {match_datetime_cet} → ET: {match_datetime_et}")
+                
+                if games:
+                    logger.info(f"     Similar games found:")
+                    for game in games:
+                        logger.info(f"       {game[0]} {game[1]} (Score: {game[2]}-{game[3]})")
+                else:
+                    logger.info(f"     No similar games found in database")
+                    
+            except Exception as e:
+                logger.debug(f"Error in debugging sample: {e}")
+                continue
     
     def get_data_summary(self):
         """Generate comprehensive data summary with franchise info"""
@@ -1540,6 +1753,7 @@ def main():
         logger.info("  ✅ Directory-aware file import (data/raw/ and data/odds/)")
         logger.info("  ✅ FIXED: Automatic team name column detection for CSV imports")
         logger.info("  ✅ NEW: Hierarchical import strategy (eliminates data duplication)")
+        logger.info("  ✅ ENHANCED: Timezone conversion for Betexplorer odds (CET→ET)")
         
         logger.info("\n🔧 Database is ready for:")
         logger.info("  • Historical data import from any NHL season")
@@ -1547,6 +1761,7 @@ def main():
         logger.info("  • Venue data population and assignment")
         logger.info("  • Advanced betting market support")
         logger.info("  • ML model predictions and value bet calculations")
+        logger.info("  • Timezone-aware odds import from European sources")
         logger.info("="*80)
         
     except Exception as e:
