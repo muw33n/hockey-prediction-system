@@ -6,6 +6,7 @@ Database setup with updated schema for:
 - Odds storage for moneyline 2-way
 - URL storage for additional game information
 - FIXED: Team name column detection for imports
+- IMPROVED: Hierarchical import strategy (eliminates data duplication)
 """
 
 import pandas as pd
@@ -17,7 +18,8 @@ import os
 import logging
 from datetime import datetime
 import glob
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Set
+import re
 
 # Load environment variables
 load_dotenv()
@@ -34,7 +36,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class DatabaseManager:
-    """Manages database operations with updated schema"""
+    """Manages database operations with updated schema and improved import strategy"""
     
     def __init__(self):
         self.database_url = os.getenv('DATABASE_URL')
@@ -52,6 +54,12 @@ class DatabaseManager:
         
         # Log available data files at startup
         self.log_available_files()
+        
+        # Team name mapping for Arizona -> Utah transition
+        self.team_name_mapping = {
+            'Arizona Coyotes': 'Utah Mammoth',
+            'Utah Hockey Club': 'Utah Mammoth'
+        }
         
     def ensure_data_directories(self):
         """Ensure data directories exist"""
@@ -113,7 +121,6 @@ class DatabaseManager:
         
         try:
             # Extract timestamp from pattern like: nhl_games_20250616_190551.csv
-            import re
             match = re.search(r'_(\d{8}_\d{6})\.csv$', os.path.basename(filename))
             if match:
                 timestamp_str = match.group(1)
@@ -126,12 +133,16 @@ class DatabaseManager:
             return "Unknown timestamp"
         except Exception:
             return "Invalid timestamp"
-        
-        # Team name mapping for Arizona -> Utah transition
-        self.team_name_mapping = {
-            'Arizona Coyotes': 'Utah Mammoth',
-            'Utah Hockey Club': 'Utah Mammoth'
-        }
+    
+    def extract_sort_key(self, filename):
+        """Extract sort key for file ordering"""
+        try:
+            match = re.search(r'_(\d{8}_\d{6})\.csv$', os.path.basename(filename))
+            if match:
+                return match.group(1)
+            return "00000000_000000"
+        except Exception:
+            return "00000000_000000"
         
     def check_permissions(self):
         """Check if we have necessary permissions"""
@@ -776,7 +787,7 @@ class DatabaseManager:
         return basic_mappings.get(team_name, team_name)
     
     def import_scraped_data(self):
-        """Import data from CSV files with directory-aware search"""
+        """Import data from CSV files with improved strategy - eliminates duplication"""
         
         try:
             # Import games - find most recent file in data/raw/
@@ -788,41 +799,30 @@ class DatabaseManager:
             if not games_files:
                 logger.warning(f"No games files found in {self.data_paths['nhl_data']}")
             
-            # Import team stats
+            # PRIMARY: Import team stats (comprehensive data)
             stats_files = self.find_latest_data_files('nhl_team_stats')
+            teams_with_stats = set()
+            
             for file_path in stats_files:
-                logger.info(f"Importing team stats from {os.path.relpath(file_path)}...")
-                self.import_team_stats_data(file_path)
+                logger.info(f"Importing comprehensive team stats from {os.path.relpath(file_path)}...")
+                imported_teams = self.import_team_stats_data(file_path, return_teams=True)
+                teams_with_stats.update(imported_teams)
             
-            if not stats_files:
-                logger.warning(f"No team stats files found in {self.data_paths['nhl_data']}")
-            
-            # Import standings (optional)
+            # FALLBACK: Import standings only for teams/seasons missing in team_stats
             standings_files = self.find_latest_data_files('nhl_standings')
             for file_path in standings_files:
-                logger.info(f"Importing standings from {os.path.relpath(file_path)}...")
-                self.import_standings_data(file_path)
+                logger.info(f"Importing standings as fallback from {os.path.relpath(file_path)}...")
+                self.import_standings_as_fallback(file_path, exclude_teams=teams_with_stats)
             
-            if standings_files:
-                logger.info(f"Found {len(standings_files)} standings files")
+            # Report import strategy results
+            self.report_import_strategy_results()
             
             # Import odds - search in data/odds/ directory
             odds_pattern = os.path.join(self.data_paths['odds_data'], 'nhl_odds_*.csv')
             odds_files = glob.glob(odds_pattern)
             
             if odds_files:
-                # Sort by timestamp for consistent processing
-                def extract_sort_key(filename):
-                    try:
-                        import re
-                        match = re.search(r'_(\d{8}_\d{6})\.csv$', os.path.basename(filename))
-                        if match:
-                            return match.group(1)
-                        return "00000000_000000"
-                    except Exception:
-                        return "00000000_000000"
-                
-                odds_files.sort(key=extract_sort_key, reverse=True)
+                odds_files.sort(key=self.extract_sort_key, reverse=True)
                 logger.info(f"📊 Found {len(odds_files)} odds files in {self.data_paths['odds_data']}")
                 
                 for file_path in odds_files:
@@ -858,18 +858,7 @@ class DatabaseManager:
                 return []
             
             # Sort by timestamp extracted from filename
-            def extract_sort_key(filename):
-                try:
-                    import re
-                    match = re.search(r'_(\d{8}_\d{6})\.csv$', os.path.basename(filename))
-                    if match:
-                        # Return timestamp as sortable string: 20250616-190551
-                        return match.group(1)
-                    return "00000000_000000"  # Fallback for files without timestamp
-                except Exception:
-                    return "00000000_000000"
-            
-            files.sort(key=extract_sort_key, reverse=True)  # Most recent first
+            files.sort(key=self.extract_sort_key, reverse=True)  # Most recent first
             
             # Log what we found
             logger.info(f"📄 Found {len(files)} {base_name} files in {search_dir}:")
@@ -918,8 +907,13 @@ class DatabaseManager:
             logger.error(f"File integrity check failed for {file_path}: {e}")
             return False
     
-    def import_standings_data(self, file_path: str):
-        """Import standings data (similar structure to team_stats) with automatic team column detection"""
+    def import_team_stats_data(self, file_path: str, return_teams: bool = False):
+        """Import comprehensive team stats with tracking of processed teams"""
+        
+        # Verify file integrity first
+        if not self.verify_file_integrity(file_path):
+            logger.error(f"Skipping import of {file_path} due to integrity issues")
+            return set() if return_teams else None
         
         try:
             df = pd.read_csv(file_path)
@@ -927,7 +921,12 @@ class DatabaseManager:
             # Detect team name column automatically
             team_column = self.detect_team_name_column(df)
             
-            standings_imported = 0
+            stats_imported = 0
+            stats_skipped = 0
+            processed_teams = set()  # Track (team_id, season) pairs
+            
+            logger.info(f"📈 Starting import of {len(df)} comprehensive team stats from {os.path.basename(file_path)}")
+            logger.info(f"🎯 Using team name column: '{team_column}'")
             
             with self.engine.connect() as conn:
                 for _, row in df.iterrows():
@@ -937,66 +936,251 @@ class DatabaseManager:
                         
                         if not team_name:
                             logger.debug(f"Empty team name in row, skipping")
+                            stats_skipped += 1
                             continue
                         
-                        # For standings, we use the season year to determine the correct team identity
+                        # For team stats, we use the season year to determine the correct team identity
                         season = int(row['season'])
                         # Convert season to approximate date (start of season)
                         season_start_date = pd.to_datetime(f'{season-1}-10-01').date()
                         
                         team_id = self.get_team_id_for_date(team_name, season_start_date, conn)
                         if not team_id:
-                            logger.warning(f"Team not found in standings: {team_name} for season {season}")
+                            logger.debug(f"Team not found: {team_name} for season {season}")
+                            stats_skipped += 1
                             continue
                         
-                        # Check if team_stats record exists, if not create basic one
+                        # COMPREHENSIVE team stats insert (with all available columns)
+                        stats_sql = """
+                        INSERT INTO team_stats (
+                            team_id, season, games_played, wins, losses, overtime_losses, points,
+                            points_percentage, goals_for, goals_against, shootout_wins, shootout_losses,
+                            srs, sos, goals_for_per_game, goals_against_per_game,
+                            power_play_goals, power_play_opportunities, power_play_percentage,
+                            penalty_kill_percentage, short_handed_goals, short_handed_goals_allowed,
+                            shots, shot_percentage, shots_against, save_percentage, shutouts,
+                            penalties_per_game, opponent_penalties_per_game, average_age
+                        )
+                        VALUES (
+                            :team_id, :season, :gp, :w, :l, :ol, :pts, :pts_pct, :gf, :ga, :sow, :sol,
+                            :srs, :sos, :gf_per_g, :ga_per_g, :pp, :ppo, :pp_pct, :pk_pct, :sh, :sha,
+                            :shots, :shot_pct, :sa, :sv_pct, :so, :pim_per_g, :opim_per_g, :avg_age
+                        )
+                        ON CONFLICT (team_id, season) DO UPDATE SET
+                            games_played = EXCLUDED.games_played,
+                            wins = EXCLUDED.wins,
+                            losses = EXCLUDED.losses,
+                            overtime_losses = EXCLUDED.overtime_losses,
+                            points = EXCLUDED.points,
+                            points_percentage = EXCLUDED.points_percentage,
+                            goals_for = EXCLUDED.goals_for,
+                            goals_against = EXCLUDED.goals_against,
+                            -- Update all comprehensive stats
+                            power_play_percentage = EXCLUDED.power_play_percentage,
+                            penalty_kill_percentage = EXCLUDED.penalty_kill_percentage,
+                            shot_percentage = EXCLUDED.shot_percentage,
+                            save_percentage = EXCLUDED.save_percentage,
+                            shutouts = EXCLUDED.shutouts,
+                            average_age = EXCLUDED.average_age;
+                        """
+                        
+                        conn.execute(text(stats_sql), {
+                            'team_id': team_id,
+                            'season': season,
+                            'gp': int(row['GP']) if pd.notna(row['GP']) else None,
+                            'w': int(row['W']) if pd.notna(row['W']) else None,
+                            'l': int(row['L']) if pd.notna(row['L']) else None,
+                            'ol': int(row['OL']) if pd.notna(row['OL']) else None,
+                            'pts': int(row['PTS']) if pd.notna(row['PTS']) else None,
+                            'pts_pct': float(row['PTS%']) if pd.notna(row['PTS%']) else None,
+                            'gf': int(row['GF']) if pd.notna(row['GF']) else None,
+                            'ga': int(row['GA']) if pd.notna(row['GA']) else None,
+                            'sow': int(row['SOW']) if pd.notna(row['SOW']) else None,
+                            'sol': int(row['SOL']) if pd.notna(row['SOL']) else None,
+                            'srs': float(row['SRS']) if pd.notna(row['SRS']) else None,
+                            'sos': float(row['SOS']) if pd.notna(row['SOS']) else None,
+                            'gf_per_g': float(row['GF/G']) if pd.notna(row['GF/G']) else None,
+                            'ga_per_g': float(row['GA/G']) if pd.notna(row['GA/G']) else None,
+                            'pp': int(row['PP']) if pd.notna(row['PP']) else None,
+                            'ppo': int(row['PPO']) if pd.notna(row['PPO']) else None,
+                            'pp_pct': float(row['PP%']) if pd.notna(row['PP%']) else None,
+                            'pk_pct': float(row['PK%']) if pd.notna(row['PK%']) else None,
+                            'sh': int(row['SH']) if pd.notna(row['SH']) else None,
+                            'sha': int(row['SHA']) if pd.notna(row['SHA']) else None,
+                            'shots': int(row['S']) if pd.notna(row['S']) else None,
+                            'shot_pct': float(row['S%']) if pd.notna(row['S%']) else None,
+                            'sa': int(row['SA']) if pd.notna(row['SA']) else None,
+                            'sv_pct': float(row['SV%']) if pd.notna(row['SV%']) else None,
+                            'so': int(row['SO']) if pd.notna(row['SO']) else None,
+                            'pim_per_g': float(row['PIM/G']) if pd.notna(row['PIM/G']) else None,
+                            'opim_per_g': float(row['oPIM/G']) if pd.notna(row['oPIM/G']) else None,
+                            'avg_age': float(row['AvAge']) if pd.notna(row['AvAge']) else None
+                        })
+                        
+                        stats_imported += 1
+                        processed_teams.add((team_id, season))
+                        
+                    except Exception as e:
+                        logger.error(f"Error importing team stats row: {e}")
+                        stats_skipped += 1
+                        continue
+                
+                conn.commit()
+                logger.info(f"✅ Comprehensive team stats import completed:")
+                logger.info(f"  📊 Imported: {stats_imported} team stats (COMPREHENSIVE)")
+                logger.info(f"  ⚠️  Skipped: {stats_skipped} team stats")
+                logger.info(f"  📁 Source: {os.path.basename(file_path)}")
+                
+                if return_teams:
+                    return processed_teams
+                
+        except Exception as e:
+            logger.error(f"❌ Error importing team stats: {e}")
+            return set() if return_teams else None
+    
+    def import_standings_as_fallback(self, file_path: str, exclude_teams: Set = None):
+        """Import standings ONLY as fallback for teams not covered by comprehensive stats"""
+        
+        if exclude_teams is None:
+            exclude_teams = set()
+        
+        try:
+            df = pd.read_csv(file_path)
+            
+            # Detect team name column automatically
+            team_column = self.detect_team_name_column(df)
+            
+            standings_imported = 0
+            standings_skipped_existing = 0
+            standings_skipped_missing = 0
+            
+            logger.info(f"🔄 Processing {len(df)} standings as FALLBACK data from {os.path.basename(file_path)}")
+            logger.info(f"🎯 Using team name column: '{team_column}'")
+            logger.info(f"🚫 Excluding {len(exclude_teams)} teams already covered by comprehensive stats")
+            
+            with self.engine.connect() as conn:
+                for _, row in df.iterrows():
+                    try:
+                        # Clean team name (remove * and other suffixes)
+                        team_name = str(row.get(team_column, '')).replace('*', '').strip()
+                        
+                        if not team_name:
+                            standings_skipped_missing += 1
+                            continue
+                        
+                        season = int(row['season'])
+                        season_start_date = pd.to_datetime(f'{season-1}-10-01').date()
+                        
+                        team_id = self.get_team_id_for_date(team_name, season_start_date, conn)
+                        if not team_id:
+                            standings_skipped_missing += 1
+                            continue
+                        
+                        # Skip if already covered by comprehensive team stats
+                        if (team_id, season) in exclude_teams:
+                            standings_skipped_existing += 1
+                            logger.debug(f"Skipping {team_name} {season} - already covered by team_stats")
+                            continue
+                        
+                        # Check if team_stats record exists (double-check)
                         existing_stats = conn.execute(text("""
                             SELECT id FROM team_stats WHERE team_id = :team_id AND season = :season
                         """), {'team_id': team_id, 'season': season}).fetchone()
                         
-                        if not existing_stats:
-                            # Create basic team_stats record from standings
-                            stats_sql = """
-                            INSERT INTO team_stats (
-                                team_id, season, games_played, wins, losses, overtime_losses, points,
-                                points_percentage, goals_for, goals_against, srs, sos
-                            )
-                            VALUES (
-                                :team_id, :season, :gp, :w, :l, :ol, :pts, :pts_pct, :gf, :ga, :srs, :sos
-                            )
-                            ON CONFLICT (team_id, season) DO UPDATE SET
-                                games_played = EXCLUDED.games_played,
-                                wins = EXCLUDED.wins,
-                                losses = EXCLUDED.losses,
-                                points = EXCLUDED.points;
-                            """
-                            
-                            conn.execute(text(stats_sql), {
-                                'team_id': team_id,
-                                'season': season,
-                                'gp': int(row['GP']) if pd.notna(row['GP']) else None,
-                                'w': int(row['W']) if pd.notna(row['W']) else None,
-                                'l': int(row['L']) if pd.notna(row['L']) else None,
-                                'ol': int(row['OL']) if pd.notna(row['OL']) else None,
-                                'pts': int(row['PTS']) if pd.notna(row['PTS']) else None,
-                                'pts_pct': float(row['PTS%']) if pd.notna(row['PTS%']) else None,
-                                'gf': int(row['GF']) if pd.notna(row['GF']) else None,
-                                'ga': int(row['GA']) if pd.notna(row['GA']) else None,
-                                'srs': float(row['SRS']) if pd.notna(row['SRS']) else None,
-                                'sos': float(row['SOS']) if pd.notna(row['SOS']) else None
-                            })
-                            
-                            standings_imported += 1
+                        if existing_stats:
+                            standings_skipped_existing += 1
+                            logger.debug(f"Skipping {team_name} {season} - team_stats record exists")
+                            continue
+                        
+                        # Create BASIC team_stats record from standings (limited columns only)
+                        fallback_sql = """
+                        INSERT INTO team_stats (
+                            team_id, season, games_played, wins, losses, overtime_losses, points,
+                            points_percentage, goals_for, goals_against, srs, sos
+                        )
+                        VALUES (
+                            :team_id, :season, :gp, :w, :l, :ol, :pts, :pts_pct, :gf, :ga, :srs, :sos
+                        );
+                        """
+                        
+                        conn.execute(text(fallback_sql), {
+                            'team_id': team_id,
+                            'season': season,
+                            'gp': int(row['GP']) if pd.notna(row['GP']) else None,
+                            'w': int(row['W']) if pd.notna(row['W']) else None,
+                            'l': int(row['L']) if pd.notna(row['L']) else None,
+                            'ol': int(row['OL']) if pd.notna(row['OL']) else None,
+                            'pts': int(row['PTS']) if pd.notna(row['PTS']) else None,
+                            'pts_pct': float(row['PTS%']) if pd.notna(row['PTS%']) else None,
+                            'gf': int(row['GF']) if pd.notna(row['GF']) else None,
+                            'ga': int(row['GA']) if pd.notna(row['GA']) else None,
+                            'srs': float(row['SRS']) if pd.notna(row['SRS']) else None,
+                            'sos': float(row['SOS']) if pd.notna(row['SOS']) else None
+                        })
+                        
+                        standings_imported += 1
                         
                     except Exception as e:
-                        logger.error(f"Error importing standings row: {e}")
+                        logger.error(f"Error importing standings fallback row: {e}")
                         continue
                 
                 conn.commit()
-                logger.info(f"✅ Imported {standings_imported} standings records from {file_path}")
+                logger.info(f"✅ Standings fallback import completed:")
+                logger.info(f"  📊 Imported: {standings_imported} basic team stats (FALLBACK)")
+                logger.info(f"  ⏭️  Skipped (already covered): {standings_skipped_existing}")
+                logger.info(f"  ⚠️  Skipped (missing teams): {standings_skipped_missing}")
+                logger.info(f"  📁 Source: {os.path.basename(file_path)}")
                 
         except Exception as e:
-            logger.error(f"❌ Error importing standings data: {e}")
+            logger.error(f"❌ Error importing standings as fallback: {e}")
+    
+    def report_import_strategy_results(self):
+        """Report final import strategy results"""
+        
+        try:
+            with self.engine.connect() as conn:
+                # Count teams with comprehensive vs basic stats
+                comprehensive_count = conn.execute(text("""
+                    SELECT COUNT(*) FROM team_stats 
+                    WHERE power_play_percentage IS NOT NULL  -- Indicator of comprehensive data
+                """)).fetchone()[0]
+                
+                basic_count = conn.execute(text("""
+                    SELECT COUNT(*) FROM team_stats 
+                    WHERE power_play_percentage IS NULL  -- Indicator of basic/fallback data
+                """)).fetchone()[0]
+                
+                total_count = comprehensive_count + basic_count
+                
+                logger.info(f"\n📋 IMPORT STRATEGY RESULTS:")
+                logger.info(f"  🏒 Total team-season records: {total_count}")
+                logger.info(f"  📈 Comprehensive stats (from team_stats): {comprehensive_count}")
+                logger.info(f"  📊 Basic stats (from standings fallback): {basic_count}")
+                
+                if total_count > 0:
+                    comprehensive_pct = (comprehensive_count / total_count) * 100
+                    logger.info(f"  ✅ Data completeness: {comprehensive_pct:.1f}% comprehensive")
+                
+                # Show teams with only basic data (for debugging)
+                if basic_count > 0:
+                    basic_teams = conn.execute(text("""
+                        SELECT t.name, ts.season 
+                        FROM team_stats ts
+                        JOIN teams t ON ts.team_id = t.id
+                        WHERE ts.power_play_percentage IS NULL
+                        ORDER BY ts.season, t.name
+                        LIMIT 10
+                    """)).fetchall()
+                    
+                    logger.info(f"  🔍 Teams with basic data (sample):")
+                    for team_name, season in basic_teams:
+                        logger.info(f"    {team_name} ({season})")
+                    
+                    if basic_count > 10:
+                        logger.info(f"    ... and {basic_count - 10} more")
+                
+        except Exception as e:
+            logger.error(f"Error generating import strategy report: {e}")
     
     def import_games_data(self, file_path: str):
         """Import games data with simplified venue handling"""
@@ -1184,119 +1368,6 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"❌ Error importing odds data: {e}")
     
-    def import_team_stats_data(self, file_path: str):
-        """Import team stats with enhanced team name resolution and automatic column detection"""
-        
-        # Verify file integrity first
-        if not self.verify_file_integrity(file_path):
-            logger.error(f"Skipping import of {file_path} due to integrity issues")
-            return
-        
-        try:
-            df = pd.read_csv(file_path)
-            
-            # Detect team name column automatically
-            team_column = self.detect_team_name_column(df)
-            
-            stats_imported = 0
-            stats_skipped = 0
-            
-            logger.info(f"📈 Starting import of {len(df)} team stats from {os.path.basename(file_path)}")
-            logger.info(f"🎯 Using team name column: '{team_column}'")
-            
-            with self.engine.connect() as conn:
-                for _, row in df.iterrows():
-                    try:
-                        # Clean team name (remove * and other suffixes)
-                        team_name = str(row.get(team_column, '')).replace('*', '').strip()
-                        
-                        if not team_name:
-                            logger.debug(f"Empty team name in row, skipping")
-                            stats_skipped += 1
-                            continue
-                        
-                        # For team stats, we use the season year to determine the correct team identity
-                        season = int(row['season'])
-                        # Convert season to approximate date (start of season)
-                        season_start_date = pd.to_datetime(f'{season-1}-10-01').date()
-                        
-                        team_id = self.get_team_id_for_date(team_name, season_start_date, conn)
-                        if not team_id:
-                            logger.debug(f"Team not found: {team_name} for season {season}")
-                            stats_skipped += 1
-                            continue
-                        
-                        stats_sql = """
-                        INSERT INTO team_stats (
-                            team_id, season, games_played, wins, losses, overtime_losses, points,
-                            points_percentage, goals_for, goals_against, shootout_wins, shootout_losses,
-                            srs, sos, goals_for_per_game, goals_against_per_game,
-                            power_play_goals, power_play_opportunities, power_play_percentage,
-                            penalty_kill_percentage, short_handed_goals, short_handed_goals_allowed,
-                            shots, shot_percentage, shots_against, save_percentage, shutouts,
-                            penalties_per_game, opponent_penalties_per_game, average_age
-                        )
-                        VALUES (
-                            :team_id, :season, :gp, :w, :l, :ol, :pts, :pts_pct, :gf, :ga, :sow, :sol,
-                            :srs, :sos, :gf_per_g, :ga_per_g, :pp, :ppo, :pp_pct, :pk_pct, :sh, :sha,
-                            :shots, :shot_pct, :sa, :sv_pct, :so, :pim_per_g, :opim_per_g, :avg_age
-                        )
-                        ON CONFLICT (team_id, season) DO UPDATE SET
-                            games_played = EXCLUDED.games_played,
-                            wins = EXCLUDED.wins,
-                            losses = EXCLUDED.losses,
-                            points = EXCLUDED.points;
-                        """
-                        
-                        conn.execute(text(stats_sql), {
-                            'team_id': team_id,
-                            'season': season,
-                            'gp': int(row['GP']) if pd.notna(row['GP']) else None,
-                            'w': int(row['W']) if pd.notna(row['W']) else None,
-                            'l': int(row['L']) if pd.notna(row['L']) else None,
-                            'ol': int(row['OL']) if pd.notna(row['OL']) else None,
-                            'pts': int(row['PTS']) if pd.notna(row['PTS']) else None,
-                            'pts_pct': float(row['PTS%']) if pd.notna(row['PTS%']) else None,
-                            'gf': int(row['GF']) if pd.notna(row['GF']) else None,
-                            'ga': int(row['GA']) if pd.notna(row['GA']) else None,
-                            'sow': int(row['SOW']) if pd.notna(row['SOW']) else None,
-                            'sol': int(row['SOL']) if pd.notna(row['SOL']) else None,
-                            'srs': float(row['SRS']) if pd.notna(row['SRS']) else None,
-                            'sos': float(row['SOS']) if pd.notna(row['SOS']) else None,
-                            'gf_per_g': float(row['GF/G']) if pd.notna(row['GF/G']) else None,
-                            'ga_per_g': float(row['GA/G']) if pd.notna(row['GA/G']) else None,
-                            'pp': int(row['PP']) if pd.notna(row['PP']) else None,
-                            'ppo': int(row['PPO']) if pd.notna(row['PPO']) else None,
-                            'pp_pct': float(row['PP%']) if pd.notna(row['PP%']) else None,
-                            'pk_pct': float(row['PK%']) if pd.notna(row['PK%']) else None,
-                            'sh': int(row['SH']) if pd.notna(row['SH']) else None,
-                            'sha': int(row['SHA']) if pd.notna(row['SHA']) else None,
-                            'shots': int(row['S']) if pd.notna(row['S']) else None,
-                            'shot_pct': float(row['S%']) if pd.notna(row['S%']) else None,
-                            'sa': int(row['SA']) if pd.notna(row['SA']) else None,
-                            'sv_pct': float(row['SV%']) if pd.notna(row['SV%']) else None,
-                            'so': int(row['SO']) if pd.notna(row['SO']) else None,
-                            'pim_per_g': float(row['PIM/G']) if pd.notna(row['PIM/G']) else None,
-                            'opim_per_g': float(row['oPIM/G']) if pd.notna(row['oPIM/G']) else None,
-                            'avg_age': float(row['AvAge']) if pd.notna(row['AvAge']) else None
-                        })
-                        
-                        stats_imported += 1
-                        
-                    except Exception as e:
-                        logger.error(f"Error importing team stats row: {e}")
-                        stats_skipped += 1
-                        continue
-                
-                conn.commit()
-                logger.info(f"✅ Team stats import completed:")
-                logger.info(f"  📊 Imported: {stats_imported} team stats")
-                logger.info(f"  ⚠️  Skipped: {stats_skipped} team stats")
-                logger.info(f"  📁 Source: {os.path.basename(file_path)}")
-                
-        except Exception as e:
-            logger.error(f"❌ Error importing team stats: {e}")
-    
     def get_data_summary(self):
         """Generate comprehensive data summary with franchise info"""
         
@@ -1420,7 +1491,7 @@ def main():
     # Create logs directory
     os.makedirs('logs', exist_ok=True)
     
-    logger.info("🏒 Starting NHL Database Setup with Directory-Aware File Import...")
+    logger.info("🏒 Starting NHL Database Setup with Hierarchical Import Strategy...")
     logger.info("📂 Expected file locations:")
     logger.info("  NHL Data: data/raw/nhl_games_*.csv, data/raw/nhl_team_stats_*.csv, data/raw/nhl_standings_*.csv")
     logger.info("  Odds Data: data/odds/nhl_odds_*.csv")
@@ -1442,7 +1513,7 @@ def main():
             return
         
         # Import scraped data
-        logger.info("\n📊 Importing scraped NHL data from directories...")  
+        logger.info("\n📊 Importing scraped NHL data with hierarchical strategy...")  
         if not db_manager.import_scraped_data():
             logger.error("❌ Failed to import scraped data.")
             logger.info("💡 Make sure your data files are in the correct directories:")
@@ -1468,6 +1539,7 @@ def main():
         logger.info("  ✅ Helper views and functions for easier data querying")
         logger.info("  ✅ Directory-aware file import (data/raw/ and data/odds/)")
         logger.info("  ✅ FIXED: Automatic team name column detection for CSV imports")
+        logger.info("  ✅ NEW: Hierarchical import strategy (eliminates data duplication)")
         
         logger.info("\n🔧 Database is ready for:")
         logger.info("  • Historical data import from any NHL season")
