@@ -2,7 +2,7 @@
 """
 Elo Rating System for NHL Hockey Predictions
 Implements dynamic team ratings that update after each game
-Updated for franchise-based database schema with training/backtesting split
+Updated for franchise-based database schema with training/backtesting split 
 """
 
 import pandas as pd
