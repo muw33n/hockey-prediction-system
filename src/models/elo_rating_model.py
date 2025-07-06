@@ -2,6 +2,7 @@
 """
 Elo Rating System for NHL Hockey Predictions
 Implements dynamic team ratings that update after each game
+Updated for franchise-based database schema with training/backtesting split
 """
 
 import pandas as pd
@@ -32,6 +33,7 @@ logger = logging.getLogger(__name__)
 class EloRatingSystem:
     """
     Elo Rating System for NHL team predictions
+        Updated for franchise-based database schema
     """
     
     def __init__(self, 
@@ -147,33 +149,49 @@ class EloRatingSystem:
         else:
             return 0.5, 'TIE'  # Shouldn't happen in modern NHL
     
-    def load_historical_games(self, season_start: str = '2022') -> pd.DataFrame:
+    # === NAHRADIT EXISTUJÍCÍ METODU ===
+    def load_historical_games(self, season_start: str = '2022', season_end: str = '2024') -> pd.DataFrame:
         """
         Load historical games from database for training
+        KRITICKÉ: Načítá pouze data do sezóny 2023/24 (včetně)
+        Data z 2024/25 jsou rezervována pro backtesting!
         
         Args:
             season_start: First season to include (e.g., '2022')
+            season_end: Last season to include for training (default '2024' = season 2023/24)
             
         Returns:
-            DataFrame with game results
+            DataFrame with game results for training
         """
         query = f"""
         SELECT 
             g.id,
             g.date,
+            g.datetime_et,
             g.season,
             g.home_team_id,
             g.away_team_id,
             g.home_score,
             g.away_score,
             g.overtime_shootout,
+            
+            -- Home team with franchise info
             ht.name as home_team_name,
-            at.name as away_team_name
+            hf.franchise_name as home_franchise_name,
+            
+            -- Away team with franchise info  
+            at.name as away_team_name,
+            af.franchise_name as away_franchise_name
+            
         FROM games g
         JOIN teams ht ON g.home_team_id = ht.id
-        JOIN teams at ON g.away_team_id = at.id
+        JOIN franchises hf ON ht.franchise_id = hf.id
+        JOIN teams at ON g.away_team_id = at.id  
+        JOIN franchises af ON at.franchise_id = af.id
+        
         WHERE g.status = 'completed'
             AND g.season >= '{season_start}'
+            AND g.season <= '{season_end}'  -- KRITICKÉ: Excluded 2024/25 from training!
             AND g.home_score IS NOT NULL 
             AND g.away_score IS NOT NULL
         ORDER BY g.date, g.id
@@ -181,27 +199,54 @@ class EloRatingSystem:
         
         df = pd.read_sql(query, self.engine)
         
-        logger.info(f"Loaded {len(df)} completed games from season {season_start} onwards")
+        logger.info(f"Loaded {len(df)} completed games for TRAINING from {season_start} to {season_end}")
+        logger.info(f"IMPORTANT: Season 2024/25 excluded - reserved for backtesting!")
         return df
     
+    # === UPRAVIT EXISTUJÍCÍ METODU ===
+    # V metodě train_on_historical_data(), PŘIDAT na začátek metody:
+
     def train_on_historical_data(self, games_df: pd.DataFrame, 
-                               evaluate_predictions: bool = True) -> Dict:
+                            evaluate_predictions: bool = True) -> Dict:
         """
         Train Elo ratings on historical game data
-        
-        Args:
-            games_df: DataFrame with historical games
-            evaluate_predictions: Whether to track predictions for evaluation
-            
-        Returns:
-            Dictionary with training results and metrics
+        KRITICKÉ: Používá pouze data do sezóny 2023/24!
+        Data z 2024/25 jsou rezervována pro backtesting.
         """
         logger.info("Training Elo ratings on historical data...")
+        # VALIDATION: Check that no 2024/25 data leaked into training
+        if not games_df.empty:
+            max_season = games_df['season'].max()
+
+            # Convert to int for comparison (handle both string and int season formats)
+            try:
+                max_season_int = int(max_season)
+                if max_season_int > 2024:
+                    raise ValueError(f"CRITICAL: Training data contains season {max_season}! "
+                                f"Only seasons <= 2024 allowed for training. "
+                                f"Season 2025 (2024/25) is reserved for backtesting!")
+            except (ValueError, TypeError):
+                # If season is not numeric, use string comparison
+                if str(max_season) > '2024':
+                    raise ValueError(f"CRITICAL: Training data contains season {max_season}! "
+                                   f"Only seasons <= '2024' allowed for training. "
+                                   f"Season '2025' (2024/25) is reserved for backtesting!")
         
-        # Initialize all teams with base rating
+        logger.info("Training Elo ratings on historical data with franchise support...")
+        logger.info(f"Training data: seasons {games_df['season'].min()} to {games_df['season'].max()}")
+        logger.info(f"CONFIRMED: Season 2024/25 excluded from training")
+        
+        # Initialize all teams with base rating - použít franchise-aware lookup
         unique_teams = set(games_df['home_team_id'].unique()) | set(games_df['away_team_id'].unique())
         for team_id in unique_teams:
-            self.team_ratings[team_id] = self.initial_rating
+            # Verify team exists in current schema
+            if self._team_exists(team_id):
+                self.team_ratings[team_id] = self.initial_rating
+            else:
+                logger.warning(f"Team ID {team_id} not found in current schema")
+        
+        # === ZBYTEK METODY ZŮSTÁVÁ BEZE ZMĚN ===
+        # (pouze přidat validation na začátek)
         
         # Track for evaluation
         predictions = []
@@ -276,6 +321,16 @@ class EloRatingSystem:
             'rating_history': self.rating_history[-10:]  # Last 10 for inspection
         }
     
+    # PŘIDAT helper metodu:
+    def _team_exists(self, team_id: int) -> bool:
+        """Check if team exists in current schema"""
+        try:
+            query = "SELECT 1 FROM teams WHERE id = %s LIMIT 1"
+            result = pd.read_sql(query, self.engine, params=[team_id])
+            return not result.empty
+        except:
+            return False
+    
     def _apply_season_regression(self):
         """Apply regression towards mean between seasons"""
         mean_rating = np.mean(list(self.team_ratings.values()))
@@ -319,9 +374,11 @@ class EloRatingSystem:
             'rating_difference': home_rating - away_rating + self.home_advantage
         }
     
+    # === NAHRADIT EXISTUJÍCÍ METODU ===
     def predict_upcoming_games(self, days_ahead: int = 7) -> List[Dict]:
         """
         Predict outcomes for upcoming games
+        Updated for franchise-based schema
         
         Args:
             days_ahead: Number of days ahead to predict
@@ -333,16 +390,27 @@ class EloRatingSystem:
         SELECT 
             g.id,
             g.date,
+            g.datetime_et,
             g.home_team_id,
             g.away_team_id,
+            
+            -- Current team names (is_current = TRUE)
             ht.name as home_team_name,
-            at.name as away_team_name
+            at.name as away_team_name,
+            
+            -- Franchise info for context
+            hf.franchise_name as home_franchise,
+            af.franchise_name as away_franchise
+            
         FROM games g
-        JOIN teams ht ON g.home_team_id = ht.id
-        JOIN teams at ON g.away_team_id = at.id
+        JOIN teams ht ON g.home_team_id = ht.id AND ht.is_current = TRUE
+        JOIN franchises hf ON ht.franchise_id = hf.id
+        JOIN teams at ON g.away_team_id = at.id AND at.is_current = TRUE
+        JOIN franchises af ON at.franchise_id = af.id
+        
         WHERE g.status = 'scheduled'
             AND g.date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '{days_ahead} days'
-        ORDER BY g.date
+        ORDER BY g.date, g.datetime_et
         """
         
         upcoming_games = pd.read_sql(query, self.engine)
@@ -352,13 +420,20 @@ class EloRatingSystem:
             prediction = self.predict_game(game['home_team_id'], game['away_team_id'])
             prediction['game_id'] = game['id']
             prediction['game_date'] = game['date']
+            prediction['game_datetime'] = game['datetime_et']
+            prediction['home_franchise'] = game['home_franchise']
+            prediction['away_franchise'] = game['away_franchise']
             predictions.append(prediction)
         
         logger.info(f"Generated predictions for {len(predictions)} upcoming games")
         return predictions
     
+    # === NAHRADIT EXISTUJÍCÍ METODU ===
     def get_current_ratings(self) -> pd.DataFrame:
-        """Get current team ratings as DataFrame"""
+        """
+        Get current team ratings as DataFrame
+        Updated for franchise-based schema
+        """
         if not self.team_ratings:
             return pd.DataFrame()
         
@@ -366,6 +441,10 @@ class EloRatingSystem:
         
         ratings_data = []
         for team_id, rating in self.team_ratings.items():
+            # Skip historical ratings
+            if isinstance(team_id, str) and 'historical' in str(team_id):
+                continue
+                
             ratings_data.append({
                 'team_id': team_id,
                 'team_name': team_names.get(team_id, f'Team_{team_id}'),
@@ -374,25 +453,61 @@ class EloRatingSystem:
             })
         
         df = pd.DataFrame(ratings_data)
-        df = df.sort_values('elo_rating', ascending=False).reset_index(drop=True)
-        df['rating_rank'] = range(1, len(df) + 1)
+        if not df.empty:
+            df = df.sort_values('elo_rating', ascending=False).reset_index(drop=True)
+            df['rating_rank'] = range(1, len(df) + 1)
         
         return df
     
+    # === NAHRADIT EXISTUJÍCÍ METODU ===
     def _get_team_names(self, team_ids: List[int]) -> Dict[int, str]:
-        """Get team names for given team IDs"""
+        """
+        Get team names for given team IDs
+        Updated for franchise-based schema
+        """
         if not team_ids:
             return {}
         
+        # Filter out non-integer team IDs (historical ratings)
+        valid_team_ids = [tid for tid in team_ids if isinstance(tid, int)]
+        if not valid_team_ids:
+            return {}
+
         # Handle single item case for SQL IN clause
-        if len(team_ids) == 1:
-            query = f"SELECT id, name FROM teams WHERE id = {team_ids[0]}"
+        if len(valid_team_ids) == 1:
+            query = f"""
+            SELECT t.id, 
+                CASE 
+                    WHEN t.is_current = TRUE THEN t.name
+                    ELSE CONCAT(t.name, ' (', EXTRACT(YEAR FROM t.effective_from), 
+                                '-', COALESCE(EXTRACT(YEAR FROM t.effective_to), 'present'), ')')
+                END as display_name,
+                f.franchise_name
+            FROM teams t
+            JOIN franchises f ON t.franchise_id = f.id
+            WHERE t.id = {valid_team_ids[0]}
+            """
         else:
-            team_ids_str = ','.join(map(str, team_ids))
-            query = f"SELECT id, name FROM teams WHERE id IN ({team_ids_str})"
+            team_ids_str = ','.join(map(str, valid_team_ids))
+            query = f"""
+            SELECT t.id, 
+                CASE 
+                    WHEN t.is_current = TRUE THEN t.name
+                    ELSE CONCAT(t.name, ' (', EXTRACT(YEAR FROM t.effective_from), 
+                                '-', COALESCE(EXTRACT(YEAR FROM t.effective_to), 'present'), ')')
+                END as display_name,
+                f.franchise_name
+            FROM teams t
+            JOIN franchises f ON t.franchise_id = f.id
+            WHERE t.id IN ({team_ids_str})
+            """
         
-        df = pd.read_sql(query, self.engine)
-        return dict(zip(df['id'], df['name']))
+        try:
+            df = pd.read_sql(query, self.engine)
+            return dict(zip(df['id'], df['display_name']))
+        except Exception as e:
+            logger.error(f"Error getting team names: {e}")
+            return {tid: f'Team_{tid}' for tid in valid_team_ids}
     
     def _calculate_metrics(self, predictions: List[float], actuals: List[int]) -> Dict:
         """Calculate prediction metrics"""
@@ -420,9 +535,192 @@ class EloRatingSystem:
             'log_loss': log_loss,
             'total_predictions': len(predictions)
         }
+
+    # === PŘIDAT NOVÉ METODY ===
+    def get_team_id_for_date(self, team_name: str, game_date: str) -> Optional[int]:
+        """
+        Získá správné team_id pro daný název a datum
+        Řeší historické změny (Arizona → Utah, Winnipeg Jets disambiguation)
+        
+        Args:
+            team_name: Název týmu (může být historický)
+            game_date: Datum zápasu (YYYY-MM-DD)
+            
+        Returns:
+            team_id nebo None pokud tým nebyl nalezen
+        """
+        # Normalize team name first
+        normalized_name = self._normalize_team_name(team_name, game_date)
+        
+        query = """
+        SELECT t.id, t.name, f.franchise_name 
+        FROM teams t
+        JOIN franchises f ON t.franchise_id = f.id
+        WHERE (t.name = %s OR f.franchise_name LIKE %s)
+        AND (%s >= t.effective_from)
+        AND (%s <= t.effective_to OR t.effective_to IS NULL)
+        ORDER BY t.effective_from DESC
+        LIMIT 1
+        """
+        
+        try:
+            result = pd.read_sql(query, self.engine, params=[
+                normalized_name, f'%{normalized_name}%', game_date, game_date
+            ])
+            
+            if not result.empty:
+                return int(result['id'].iloc[0])
+            else:
+                logger.warning(f"Team not found: {team_name} for date {game_date}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error resolving team {team_name} for date {game_date}: {e}")
+            return None
+
+    def _normalize_team_name(self, team_name: str, game_date: str) -> str:
+        """
+        Normalizuje názvy týmů podle data
+        Handles Arizona → Utah transition and Winnipeg Jets disambiguation
+        """
+        game_date = str(game_date)  # Ensure string format
+        
+        # Arizona/Utah mapping podle data
+        if 'Arizona Coyotes' in team_name:
+            if game_date >= '2024-04-18':
+                return 'Utah Mammoth'
+            return 'Arizona Coyotes'
+        
+        if any(x in team_name for x in ['Utah Hockey Club', 'Utah Mammoth', 'Utah HC']):
+            return 'Utah Mammoth'
+            
+        # Winnipeg Jets disambiguation
+        if 'Winnipeg Jets' in team_name:
+            if game_date <= '2011-05-31':
+                return 'Utah Mammoth'  # Historical Jets → Utah lineage
+            return 'Winnipeg Jets'      # Current Jets (from Atlanta)
+        
+        # Phoenix Coyotes historical mapping
+        if 'Phoenix Coyotes' in team_name:
+            return 'Utah Mammoth'
+        
+        return team_name
+
+    def get_franchise_id_for_team(self, team_id: int) -> Optional[int]:
+        """Získá franchise_id pro daný team_id"""
+        query = "SELECT franchise_id FROM teams WHERE id = %s"
+        try:
+            result = pd.read_sql(query, self.engine, params=[team_id])
+            return int(result['franchise_id'].iloc[0]) if not result.empty else None
+        except Exception as e:
+            logger.error(f"Error getting franchise for team {team_id}: {e}")
+            return None
+
+    def handle_franchise_transition(self, old_team_id: int, new_team_id: int, transition_date: str):
+        """
+        Přenese rating ze starého týmu na nový při změně franchise
+        """
+        if old_team_id in self.team_ratings:
+            old_rating = self.team_ratings[old_team_id]
+            self.team_ratings[new_team_id] = old_rating
+            
+            logger.info(f"Transferred rating {old_rating:.1f} from team {old_team_id} to {new_team_id} on {transition_date}")
+            
+            # Keep old rating for historical analysis but mark it
+            self.team_ratings[f"{old_team_id}_historical"] = old_rating
+
+    def load_backtesting_games(self, season: str = '2025') -> pd.DataFrame:
+        """
+        Load games for backtesting (season 2024/25)
+        KRITICKÉ: Tyto data NESMÍ být použita pro trénování!
+        
+        Args:
+            season: Season for backtesting (default '2025' = season 2024/25)
+            
+        Returns:
+            DataFrame with games for backtesting (includes scheduled games)
+        """
+        query = f"""
+        SELECT 
+            g.id,
+            g.date,
+            g.datetime_et,
+            g.season,
+            g.home_team_id,
+            g.away_team_id,
+            g.home_score,
+            g.away_score,
+            g.overtime_shootout,
+            g.status,
+            
+            -- Current team names (from franchise perspective)
+            ht.name as home_team_name,
+            hf.franchise_name as home_franchise_name,
+            
+            -- Away team with franchise info  
+            at.name as away_team_name,
+            af.franchise_name as away_franchise_name
+            
+        FROM games g
+        JOIN teams ht ON g.home_team_id = ht.id
+        JOIN franchises hf ON ht.franchise_id = hf.id
+        JOIN teams at ON g.away_team_id = at.id  
+        JOIN franchises af ON at.franchise_id = af.id
+        
+        WHERE g.season = '{season}'
+            -- Include both completed AND scheduled games for backtesting
+        ORDER BY g.date, g.datetime_et, g.id
+        """
+        
+        df = pd.read_sql(query, self.engine)
+        
+        completed_games = len(df[df['status'] == 'completed'])
+        scheduled_games = len(df[df['status'] == 'scheduled'])
+        
+        logger.info(f"Loaded {len(df)} games for BACKTESTING from season {season}")
+        logger.info(f"  - Completed: {completed_games} games")
+        logger.info(f"  - Scheduled: {scheduled_games} games")
+        logger.warning(f"REMINDER: These games were NOT used for model training!")
+        
+        return df
+
+    def get_data_split_summary(self) -> Dict:
+        """
+        Poskytne přehled rozdělení dat pro trénování vs backtesting
+        """
+        training_query = """
+        SELECT season, COUNT(*) as game_count, 'TRAINING' as dataset_type
+        FROM games 
+        WHERE status = 'completed' AND season <= '2024'
+        GROUP BY season
+        """
+        
+        backtesting_query = """
+        SELECT season, COUNT(*) as game_count, 'BACKTESTING' as dataset_type
+        FROM games 
+        WHERE season = '2025'
+        GROUP BY season
+        """
+        
+        training_df = pd.read_sql(training_query, self.engine)
+        backtesting_df = pd.read_sql(backtesting_query, self.engine)
+        
+        combined_df = pd.concat([training_df, backtesting_df], ignore_index=True)
+        
+        summary = {
+            'training_seasons': training_df['season'].tolist(),
+            'training_games': int(training_df['game_count'].sum()),
+            'backtesting_season': '2025',
+            'backtesting_games': int(backtesting_df['game_count'].sum()) if not backtesting_df.empty else 0,
+            'data_split': combined_df.to_dict('records')
+        }
+        
+        return summary
+    # === PŘIDAT NOVÉ METODY ===
     
+    # === UPRAVIT save_model() metodu ===
     def save_model(self, filepath: str = 'models/elo_model.pkl'):
-        """Save the trained model"""
+        """Save the trained model with schema version"""
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         
         model_data = {
@@ -434,18 +732,27 @@ class EloRatingSystem:
                 'season_regression': self.season_regression
             },
             'rating_history': self.rating_history,
-            'trained_date': datetime.now().isoformat()
+            'trained_date': datetime.now().isoformat(),
+            'schema_version': '2.0',  # NOVÉ: označuje franchise-based schema
+            'franchise_support': True  # NOVÉ: podporuje franchise tracking
         }
         
         with open(filepath, 'wb') as f:
             pickle.dump(model_data, f)
         
-        logger.info(f"Model saved to {filepath}")
-    
+        logger.info(f"Model saved to {filepath} (schema v2.0)")
+        
+    # === UPRAVIT load_model() metodu ===
     def load_model(self, filepath: str = 'models/elo_model.pkl'):
-        """Load a trained model"""
+        """Load a trained model with schema compatibility check"""
         with open(filepath, 'rb') as f:
             model_data = pickle.load(f)
+        
+        # Check schema version
+        schema_version = model_data.get('schema_version', '1.0')
+        if schema_version == '1.0':
+            logger.warning("Loading old schema model - consider migrating")
+            # Zde by byla migrace pokud potřeba
         
         self.team_ratings = model_data['team_ratings']
         self.rating_history = model_data['rating_history']
@@ -457,10 +764,14 @@ class EloRatingSystem:
         self.home_advantage = params['home_advantage']
         self.season_regression = params['season_regression']
         
-        logger.info(f"Model loaded from {filepath}")
+        logger.info(f"Model loaded from {filepath} (schema v{schema_version})")
 
+# === NAHRADIT EXISTUJÍCÍ main() FUNKCI ===
 def main():
-    """Main function to train and evaluate Elo model"""
+    """
+    Main function to train Elo model
+    KRITICKÉ: Trénuje pouze na datech do 2023/24, 2024/25 je pro backtesting
+    """
     
     # Create necessary directories
     os.makedirs('models', exist_ok=True)
@@ -477,16 +788,41 @@ def main():
             season_regression=0.25
         )
         
-        # Load historical data
-        logger.info("Loading historical games...")
-        games_df = elo.load_historical_games(season_start='2022')
+        # Get data split summary first
+        data_summary = elo.get_data_split_summary()
+        logger.info("\n📊 DATA SPLIT SUMMARY:")
+        logger.info(f"  Training seasons: {data_summary['training_seasons']}")
+        logger.info(f"  Training games: {data_summary['training_games']}")
+        logger.info(f"  Backtesting season: {data_summary['backtesting_season']}")
+        logger.info(f"  Backtesting games: {data_summary['backtesting_games']}")
+        
+        # Load TRAINING data (seasons 2022-2024, excluding 2024/25)
+        logger.info("\n📚 Loading TRAINING data (up to 2023/24)...")
+        games_df = elo.load_historical_games(season_start='2022', season_end='2024')
         
         if games_df.empty:
-            logger.error("No historical games found. Please ensure data is imported.")
+            logger.error("No training games found. Please ensure data is imported.")
             return
         
+        # Validate data split
+        max_season = games_df['season'].max()
+        try:
+            max_season_int = int(max_season)
+            if max_season_int > 2024:
+                logger.error(f"CRITICAL ERROR: Training data contains season {max_season}!")
+                logger.error("Season 2024/25 must be reserved for backtesting!")
+                return
+        except (ValueError, TypeError):
+            # Handle string season format
+            if str(max_season) > '2024':
+                logger.error(f"CRITICAL ERROR: Training data contains season {max_season}!")
+                logger.error("Season 2024/25 must be reserved for backtesting!")
+            return
+        
+        logger.info(f"✅ Training data validated: {len(games_df)} games from seasons {games_df['season'].min()}-{max_season}")
+        
         # Train the model
-        logger.info("Training Elo ratings...")
+        logger.info("\n🎯 Training Elo ratings...")
         results = elo.train_on_historical_data(games_df, evaluate_predictions=True)
         
         # Display results
@@ -503,23 +839,29 @@ def main():
         for _, team in ratings_df.head(10).iterrows():
             logger.info(f"  {team['rating_rank']:2d}. {team['team_name']:<25} {team['elo_rating']:7.1f}")
         
-        # Make predictions for upcoming games
-        logger.info("\n🔮 UPCOMING GAME PREDICTIONS:")
-        upcoming_predictions = elo.predict_upcoming_games(days_ahead=7)
-        
-        for prediction in upcoming_predictions[:5]:  # Show first 5
-            home_team = prediction['home_team_name']
-            away_team = prediction['away_team_name']
-            home_prob = prediction['home_win_probability']
-            confidence = prediction['confidence']
-            
-            logger.info(f"  {away_team} @ {home_team}")
-            logger.info(f"    Home Win: {home_prob:.1%} | Confidence: {confidence:.1%}")
+        # Arizona → Utah transition check
+        utah_teams = ratings_df[ratings_df['team_name'].str.contains('Utah', na=False)]
+        if not utah_teams.empty:
+            logger.info(f"\n🦣 UTAH TRANSITION VERIFIED:")
+            for _, team in utah_teams.iterrows():
+                logger.info(f"  {team['team_name']}: {team['elo_rating']:.1f} (rank {team['rating_rank']})")
         
         # Save the model
-        elo.save_model('models/elo_model.pkl')
+        elo.save_model('models/elo_model_trained_2024.pkl')
         
-        logger.info("🎉 Elo model training completed successfully!")
+        # Show backtesting data availability
+        logger.info("\n📊 BACKTESTING DATA AVAILABLE:")
+        backtesting_df = elo.load_backtesting_games('2025')
+        completed_backtest = len(backtesting_df[backtesting_df['status'] == 'completed'])
+        logger.info(f"  Total games: {len(backtesting_df)}")
+        logger.info(f"  Completed (ready for backtest): {completed_backtest}")
+        logger.info(f"  Scheduled (future predictions): {len(backtesting_df) - completed_backtest}")
+        
+        logger.info("\n🎉 Model training completed successfully!")
+        logger.info("📋 NEXT STEPS:")
+        logger.info("  1. Run backtesting on 2024/25 season data")
+        logger.info("  2. Validate model performance on out-of-sample data")
+        logger.info("  3. If successful, proceed to live trading implementation")
         
     except Exception as e:
         logger.error(f"❌ Elo model training failed: {e}")
