@@ -438,8 +438,9 @@ class EloRatingSystem:
         
         logger.debug("Getting current ratings...")
         
-        # Get team names with debugging
-        team_ids = [tid for tid in self.team_ratings.keys() if isinstance(tid, int)]
+        # OPRAVA (funguje s numpy):
+        team_ids = [tid for tid in self.team_ratings.keys() 
+            if isinstance(tid, (int, np.integer)) and not isinstance(tid, str)]
         logger.debug(f"Getting names for {len(team_ids)} teams...")
         
         team_names = self._get_team_names(team_ids)
@@ -478,8 +479,9 @@ class EloRatingSystem:
         if not team_ids:
             return {}
         
-        # Filter out non-integer team IDs
-        valid_team_ids = [tid for tid in team_ids if isinstance(tid, int)]
+        # OPRAVA:
+        valid_team_ids = [int(tid) for tid in team_ids 
+                  if isinstance(tid, (int, np.integer))]
         if not valid_team_ids:
             logger.warning("No valid integer team IDs found")
             return {}
@@ -523,7 +525,7 @@ class EloRatingSystem:
             logger.error(f"SQL error in _get_team_names: {e}")
             logger.error(f"Query was: {query}")
             # Return fallback
-            return {tid: f'Team_{tid}' for tid in valid_team_ids}
+            return {int(tid): f'Team_{tid}' for tid in valid_team_ids}
     
     def _calculate_metrics(self, predictions: List[float], actuals: List[int]) -> Dict:
         """Calculate prediction metrics"""
