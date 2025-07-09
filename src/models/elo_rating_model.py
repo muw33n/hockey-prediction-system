@@ -205,7 +205,7 @@ class EloRatingSystem:
     
     # === UPRAVIT EXISTUJÍCÍ METODU ===
     # V metodě train_on_historical_data(), PŘIDAT na začátek metody:
-
+    # OPRAVA: Odstraň zbytečnou team validation nebo ji zjednodušte (mapování týmů)
     def train_on_historical_data(self, games_df: pd.DataFrame, 
                             evaluate_predictions: bool = True) -> Dict:
         """
@@ -213,37 +213,30 @@ class EloRatingSystem:
         KRITICKÉ: Používá pouze data do sezóny 2023/24!
         Data z 2024/25 jsou rezervována pro backtesting.
         """
-        logger.info("Training Elo ratings on historical data...")
         # VALIDATION: Check that no 2024/25 data leaked into training
+        logger.info("Training Elo ratings on historical data...")
         if not games_df.empty:
             max_season = games_df['season'].max()
-
+            
             # Convert to int for comparison (handle both string and int season formats)
             try:
                 max_season_int = int(max_season)
                 if max_season_int > 2024:
-                    raise ValueError(f"CRITICAL: Training data contains season {max_season}! "
-                                f"Only seasons <= 2024 allowed for training. "
-                                f"Season 2025 (2024/25) is reserved for backtesting!")
+                    raise ValueError(f"CRITICAL: Training data contains season {max_season}!")
             except (ValueError, TypeError):
-                # If season is not numeric, use string comparison
                 if str(max_season) > '2024':
-                    raise ValueError(f"CRITICAL: Training data contains season {max_season}! "
-                                   f"Only seasons <= '2024' allowed for training. "
-                                   f"Season '2025' (2024/25) is reserved for backtesting!")
+                    raise ValueError(f"CRITICAL: Training data contains season {max_season}!")
         
         logger.info("Training Elo ratings on historical data with franchise support...")
         logger.info(f"Training data: seasons {games_df['season'].min()} to {games_df['season'].max()}")
         logger.info(f"CONFIRMED: Season 2024/25 excluded from training")
         
-        # Initialize all teams with base rating - použít franchise-aware lookup
+        # Initialize all teams with base rating - SIMPLIFIED (odstraň validation)
         unique_teams = set(games_df['home_team_id'].unique()) | set(games_df['away_team_id'].unique())
         for team_id in unique_teams:
-            # Verify team exists in current schema
-            if self._team_exists(team_id):
-                self.team_ratings[team_id] = self.initial_rating
-            else:
-                logger.warning(f"Team ID {team_id} not found in current schema")
+            self.team_ratings[team_id] = self.initial_rating
+        
+        logger.info(f"Initialized {len(unique_teams)} teams with rating {self.initial_rating}")
         
         # === ZBYTEK METODY ZŮSTÁVÁ BEZE ZMĚN ===
         # (pouze přidat validation na začátek)
@@ -321,15 +314,16 @@ class EloRatingSystem:
             'rating_history': self.rating_history[-10:]  # Last 10 for inspection
         }
     
-    # PŘIDAT helper metodu:
+    # PŘIDAT helper metodu (Zjednoduš _team_exists() pokud ji chceš zachovat - (správné mapování týmů):
     def _team_exists(self, team_id: int) -> bool:
-        """Check if team exists in current schema"""
+        """Check if team exists in current schema - SIMPLIFIED"""
         try:
-            query = "SELECT 1 FROM teams WHERE id = %s LIMIT 1"
-            result = pd.read_sql(query, self.engine, params=[team_id])
+            # Pokud team_id je v games tabulce, existuje
+            query = "SELECT 1 FROM games WHERE home_team_id = %s OR away_team_id = %s LIMIT 1"
+            result = pd.read_sql(query, self.engine, params=[team_id, team_id])
             return not result.empty
         except:
-            return False
+            return True  # Fallback - assume exists if can't check
     
     def _apply_season_regression(self):
         """Apply regression towards mean between seasons"""
@@ -460,10 +454,11 @@ class EloRatingSystem:
         return df
     
     # === NAHRADIT EXISTUJÍCÍ METODU ===
+    # OPRAVA: _get_team_names() metody - SQL chyba s COALESCE (správné mapování týmů)
     def _get_team_names(self, team_ids: List[int]) -> Dict[int, str]:
         """
         Get team names for given team IDs
-        Updated for franchise-based schema
+        Updated for franchise-based schema - FIXED SQL
         """
         if not team_ids:
             return {}
@@ -472,15 +467,21 @@ class EloRatingSystem:
         valid_team_ids = [tid for tid in team_ids if isinstance(tid, int)]
         if not valid_team_ids:
             return {}
-
+        
         # Handle single item case for SQL IN clause
         if len(valid_team_ids) == 1:
             query = f"""
             SELECT t.id, 
                 CASE 
                     WHEN t.is_current = TRUE THEN t.name
-                    ELSE CONCAT(t.name, ' (', EXTRACT(YEAR FROM t.effective_from), 
-                                '-', COALESCE(EXTRACT(YEAR FROM t.effective_to), 'present'), ')')
+                    ELSE CONCAT(t.name, ' (', 
+                                EXTRACT(YEAR FROM t.effective_from)::text, 
+                                '-', 
+                                CASE 
+                                    WHEN t.effective_to IS NULL THEN 'present'
+                                    ELSE EXTRACT(YEAR FROM t.effective_to)::text 
+                                END, 
+                                ')')
                 END as display_name,
                 f.franchise_name
             FROM teams t
@@ -493,8 +494,14 @@ class EloRatingSystem:
             SELECT t.id, 
                 CASE 
                     WHEN t.is_current = TRUE THEN t.name
-                    ELSE CONCAT(t.name, ' (', EXTRACT(YEAR FROM t.effective_from), 
-                                '-', COALESCE(EXTRACT(YEAR FROM t.effective_to), 'present'), ')')
+                    ELSE CONCAT(t.name, ' (', 
+                                EXTRACT(YEAR FROM t.effective_from)::text, 
+                                '-', 
+                                CASE 
+                                    WHEN t.effective_to IS NULL THEN 'present'
+                                    ELSE EXTRACT(YEAR FROM t.effective_to)::text 
+                                END, 
+                                ')')
                 END as display_name,
                 f.franchise_name
             FROM teams t
@@ -716,6 +723,28 @@ class EloRatingSystem:
         }
         
         return summary
+    
+    # 4. DEBUG: Přidej dotaz na zjištění skutečných team IDs v databázi
+    def debug_team_ids(self):
+        """Debug method to see actual team IDs in database"""
+        try:
+            query = """
+            SELECT t.id, t.name, t.is_current, f.franchise_name
+            FROM teams t
+            JOIN franchises f ON t.franchise_id = f.id
+            ORDER BY t.id
+            """
+            df = pd.read_sql(query, self.engine)
+            logger.info("ACTUAL TEAM IDs IN DATABASE:")
+            for _, row in df.iterrows():
+                current_flag = "✓" if row['is_current'] else "✗"
+                logger.info(f"  ID {row['id']:2d}: {row['name']} ({row['franchise_name']}) {current_flag}")
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"Error checking team IDs: {e}")
+            return pd.DataFrame()
     # === PŘIDAT NOVÉ METODY ===
     
     # === UPRAVIT save_model() metodu ===
