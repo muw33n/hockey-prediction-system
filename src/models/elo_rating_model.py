@@ -206,6 +206,7 @@ class EloRatingSystem:
     # === UPRAVIT EXISTUJÍCÍ METODU ===
     # V metodě train_on_historical_data(), PŘIDAT na začátek metody:
     # OPRAVA: Odstraň zbytečnou team validation nebo ji zjednodušte (mapování týmů)
+    # PŘIDÁN na začátek debug:
     def train_on_historical_data(self, games_df: pd.DataFrame, 
                             evaluate_predictions: bool = True) -> Dict:
         """
@@ -231,6 +232,10 @@ class EloRatingSystem:
         logger.info(f"Training data: seasons {games_df['season'].min()} to {games_df['season'].max()}")
         logger.info(f"CONFIRMED: Season 2024/25 excluded from training")
         
+        # Debug sample team IDs from data
+        sample_teams = set(list(games_df['home_team_id'].unique())[:5])
+        logger.info(f"Sample team IDs from games data: {sample_teams}")
+
         # Initialize all teams with base rating - SIMPLIFIED (odstraň validation)
         unique_teams = set(games_df['home_team_id'].unique()) | set(games_df['away_team_id'].unique())
         for team_id in unique_teams:
@@ -423,15 +428,22 @@ class EloRatingSystem:
         return predictions
     
     # === NAHRADIT EXISTUJÍCÍ METODU ===
+    # UPRAVENÁ get_current_ratings() s debugging
     def get_current_ratings(self) -> pd.DataFrame:
         """
-        Get current team ratings as DataFrame
-        Updated for franchise-based schema
+        Get current team ratings as DataFrame - DEBUG VERSION
         """
         if not self.team_ratings:
             return pd.DataFrame()
         
-        team_names = self._get_team_names(list(self.team_ratings.keys()))
+        logger.debug("Getting current ratings...")
+        
+        # Get team names with debugging
+        team_ids = [tid for tid in self.team_ratings.keys() if isinstance(tid, int)]
+        logger.debug(f"Getting names for {len(team_ids)} teams...")
+        
+        team_names = self._get_team_names(team_ids)
+        logger.debug(f"Got {len(team_names)} team names")
         
         ratings_data = []
         for team_id, rating in self.team_ratings.items():
@@ -439,11 +451,12 @@ class EloRatingSystem:
             if isinstance(team_id, str) and 'historical' in str(team_id):
                 continue
                 
+            team_name = team_names.get(team_id, f'Team_{team_id}')
             ratings_data.append({
                 'team_id': team_id,
-                'team_name': team_names.get(team_id, f'Team_{team_id}'),
+                'team_name': team_name,
                 'elo_rating': rating,
-                'rating_rank': 0  # Will be filled after sorting
+                'rating_rank': 0
             })
         
         df = pd.DataFrame(ratings_data)
@@ -455,65 +468,61 @@ class EloRatingSystem:
     
     # === NAHRADIT EXISTUJÍCÍ METODU ===
     # OPRAVA: _get_team_names() metody - SQL chyba s COALESCE (správné mapování týmů)
+    # UPRAVENÁ _get_team_names() s více debugging
     def _get_team_names(self, team_ids: List[int]) -> Dict[int, str]:
         """
-        Get team names for given team IDs
-        Updated for franchise-based schema - FIXED SQL
+        Get team names for given team IDs - DEBUG VERSION
         """
+        logger.debug(f"_get_team_names called with {len(team_ids)} IDs")
+        
         if not team_ids:
             return {}
         
-        # Filter out non-integer team IDs (historical ratings)
+        # Filter out non-integer team IDs
         valid_team_ids = [tid for tid in team_ids if isinstance(tid, int)]
         if not valid_team_ids:
+            logger.warning("No valid integer team IDs found")
             return {}
         
-        # Handle single item case for SQL IN clause
+        logger.debug(f"Valid team IDs: {valid_team_ids[:5]}...")
+        
+        # Simple query first - just get current teams
         if len(valid_team_ids) == 1:
             query = f"""
-            SELECT t.id, 
-                CASE 
-                    WHEN t.is_current = TRUE THEN t.name
-                    ELSE CONCAT(t.name, ' (', 
-                                EXTRACT(YEAR FROM t.effective_from)::text, 
-                                '-', 
-                                CASE 
-                                    WHEN t.effective_to IS NULL THEN 'present'
-                                    ELSE EXTRACT(YEAR FROM t.effective_to)::text 
-                                END, 
-                                ')')
-                END as display_name,
-                f.franchise_name
+            SELECT t.id, t.name, f.franchise_name
             FROM teams t
             JOIN franchises f ON t.franchise_id = f.id
-            WHERE t.id = {valid_team_ids[0]}
+            WHERE t.id = {valid_team_ids[0]} AND t.is_current = TRUE
             """
         else:
             team_ids_str = ','.join(map(str, valid_team_ids))
             query = f"""
-            SELECT t.id, 
-                CASE 
-                    WHEN t.is_current = TRUE THEN t.name
-                    ELSE CONCAT(t.name, ' (', 
-                                EXTRACT(YEAR FROM t.effective_from)::text, 
-                                '-', 
-                                CASE 
-                                    WHEN t.effective_to IS NULL THEN 'present'
-                                    ELSE EXTRACT(YEAR FROM t.effective_to)::text 
-                                END, 
-                                ')')
-                END as display_name,
-                f.franchise_name
+            SELECT t.id, t.name, f.franchise_name
             FROM teams t
             JOIN franchises f ON t.franchise_id = f.id
-            WHERE t.id IN ({team_ids_str})
+            WHERE t.id IN ({team_ids_str}) AND t.is_current = TRUE
             """
         
         try:
+            logger.debug(f"Executing SQL query...")
             df = pd.read_sql(query, self.engine)
-            return dict(zip(df['id'], df['display_name']))
+            logger.debug(f"Query returned {len(df)} rows")
+            
+            if df.empty:
+                logger.warning("Query returned no results - teams might not be current")
+                # Try without is_current filter
+                query_fallback = query.replace(" AND t.is_current = TRUE", "")
+                df = pd.read_sql(query_fallback, self.engine)
+                logger.debug(f"Fallback query returned {len(df)} rows")
+            
+            result = dict(zip(df['id'], df['name']))
+            logger.debug(f"Successfully mapped {len(result)} team names")
+            return result
+            
         except Exception as e:
-            logger.error(f"Error getting team names: {e}")
+            logger.error(f"SQL error in _get_team_names: {e}")
+            logger.error(f"Query was: {query}")
+            # Return fallback
             return {tid: f'Team_{tid}' for tid in valid_team_ids}
     
     def _calculate_metrics(self, predictions: List[float], actuals: List[int]) -> Dict:
@@ -795,6 +804,40 @@ class EloRatingSystem:
         
         logger.info(f"Model loaded from {filepath} (schema v{schema_version})")
 
+    # debug metoda EloRatingSystem (mapování týmů)
+    def debug_team_mapping(self):
+        """Debug method to see what's happening with team names"""
+        logger.info("🔍 DEBUGGING TEAM MAPPING:")
+        
+        # 1. Zkontroluj jaké team IDs máme v self.team_ratings
+        logger.info(f"Team IDs in self.team_ratings: {list(self.team_ratings.keys())[:10]}...")
+        
+        # 2. Zkontroluj co je v databázi
+        try:
+            query = """
+            SELECT t.id, t.name, t.is_current, f.franchise_name
+            FROM teams t
+            JOIN franchises f ON t.franchise_id = f.id
+            WHERE t.id IN (1,2,3,4,5,9,13,19,24)
+            ORDER BY t.id
+            """
+            df = pd.read_sql(query, self.engine)
+            logger.info("SAMPLE TEAMS FROM DATABASE:")
+            for _, row in df.iterrows():
+                current_flag = "✓" if row['is_current'] else "✗"
+                logger.info(f"  ID {row['id']:2d}: {row['name']} ({row['franchise_name']}) {current_flag}")
+        except Exception as e:
+            logger.error(f"Error querying teams: {e}")
+        
+        # 3. Test _get_team_names() metodu přímo
+        test_ids = [1, 9, 24]  # Top teams from log
+        logger.info(f"Testing _get_team_names() with IDs: {test_ids}")
+        try:
+            result = self._get_team_names(test_ids)
+            logger.info(f"Result: {result}")
+        except Exception as e:
+            logger.error(f"_get_team_names() failed: {e}")
+
 # === NAHRADIT EXISTUJÍCÍ main() FUNKCI ===
 def main():
     """
@@ -862,6 +905,10 @@ def main():
         logger.info(f"  Log Loss: {metrics.get('log_loss', 0):.3f}")
         logger.info(f"  Games Processed: {results['games_processed']}")
         
+        # Debug team mapping
+        logger.info("\n🔍 DEBUGGING TEAM NAMES:")
+        elo.debug_team_mapping()
+
         # Show current team rankings
         logger.info("\n🏆 TOP 10 TEAM RATINGS:")
         ratings_df = results['team_ratings']
