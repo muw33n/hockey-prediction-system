@@ -824,9 +824,11 @@ class BacktestingEngine:
         return main_file
     
     def _convert_for_json(self, obj):
-        """Convert numpy types to JSON-serializable types"""
+        """Convert numpy types and pandas objects to JSON-serializable types"""
         if isinstance(obj, dict):
-            return {key: self._convert_for_json(value) for key, value in obj.items()}
+            # Convert keys and values
+            return {self._convert_key_for_json(key): self._convert_for_json(value) 
+                   for key, value in obj.items()}
         elif isinstance(obj, list):
             return [self._convert_for_json(item) for item in obj]
         elif isinstance(obj, (np.integer, np.int64)):
@@ -837,8 +839,25 @@ class BacktestingEngine:
             return obj.tolist()
         elif isinstance(obj, (date, datetime)):
             return obj.isoformat()
+        elif hasattr(obj, 'to_timestamp'):  # pandas Period
+            return str(obj)
+        elif hasattr(obj, 'isoformat'):  # Other datetime-like objects
+            return obj.isoformat()
         else:
             return obj
+    
+    def _convert_key_for_json(self, key):
+        """Convert dictionary keys to JSON-serializable format"""
+        if isinstance(key, str):
+            return key
+        elif isinstance(key, (int, float, bool)):
+            return key
+        elif hasattr(key, 'to_timestamp'):  # pandas Period
+            return str(key)
+        elif isinstance(key, (date, datetime)):
+            return key.isoformat()
+        else:
+            return str(key)
 
 
 # Example usage and testing
