@@ -107,9 +107,17 @@ class BacktestingEngine:
             with open(self.elo_model_path, 'rb') as f:
                 model_data = pickle.load(f)
             
-            # Import EloRatingSystem class
+            # Import EloRatingSystem class with proper path resolution
             import sys
-            sys.path.append('src/models')
+            
+            # Get project root directory (two levels up from src/betting/)
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            project_root = os.path.dirname(os.path.dirname(current_dir))
+            models_path = os.path.join(project_root, 'src', 'models')
+            
+            if models_path not in sys.path:
+                sys.path.insert(0, models_path)
+            
             from elo_rating_model import EloRatingSystem
             
             # Recreate Elo model
