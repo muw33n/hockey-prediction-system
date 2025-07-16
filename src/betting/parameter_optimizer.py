@@ -647,7 +647,7 @@ def run_quick_optimization():
     
     # Run quick optimization
     results = optimizer.optimize_parameters(
-        search_type='comprehensive',
+        search_type='quick',
         optimization_target='roi',
         min_bets_threshold=20
     )
