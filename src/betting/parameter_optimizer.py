@@ -383,15 +383,58 @@ class ParameterOptimizer:
             'value': results_df.loc[best_risk_adj_idx, 'risk_adjusted_return']
         }
         
+    def _find_best_strategies(self, 
+                            valid_results: List[Dict], 
+                            primary_target: str) -> Dict[str, Dict]:
+        """Find best strategies by multiple criteria"""
+        
+        if not valid_results:
+            return {}
+        
+        # Create DataFrame with explicit position tracking
+        results_data = []
+        for i, result in enumerate(valid_results):
+            row = {**result['parameters'], **result['performance'], **result['statistics']}
+            row['_position'] = i  # Add position for easy lookup
+            results_data.append(row)
+        
+        results_df = pd.DataFrame(results_data)
+        
+        best_strategies = {}
+        
+        # Best by ROI
+        best_roi_idx = results_df['roi'].idxmax()
+        best_strategies['best_roi'] = {
+            'strategy': valid_results[results_df.loc[best_roi_idx, '_position']],
+            'rank_by': 'roi',
+            'value': results_df.loc[best_roi_idx, 'roi']
+        }
+        
+        # Best by Sharpe Ratio
+        if results_df['sharpe_ratio'].notna().any():
+            best_sharpe_idx = results_df['sharpe_ratio'].idxmax()
+            best_strategies['best_sharpe'] = {
+                'strategy': valid_results[results_df.loc[best_sharpe_idx, '_position']],
+                'rank_by': 'sharpe_ratio',
+                'value': results_df.loc[best_sharpe_idx, 'sharpe_ratio']
+            }
+        
+        # Best by Risk-Adjusted Return (ROI / Max Drawdown)
+        results_df['risk_adjusted_return'] = results_df['roi'] / (results_df['max_drawdown'] + 0.01)
+        best_risk_adj_idx = results_df['risk_adjusted_return'].idxmax()
+        best_strategies['best_risk_adjusted'] = {
+            'strategy': valid_results[results_df.loc[best_risk_adj_idx, '_position']],
+            'rank_by': 'risk_adjusted_return',
+            'value': results_df.loc[best_risk_adj_idx, 'risk_adjusted_return']
+        }
+        
         # Best by minimal drawdown (among profitable strategies)
         profitable_mask = results_df['roi'] > 0
         if profitable_mask.any():
             profitable_df = results_df[profitable_mask]
             min_dd_idx = profitable_df['max_drawdown'].idxmin()
-            # Get original index
-            original_idx = profitable_df.index[min_dd_idx]
             best_strategies['best_low_risk'] = {
-                'strategy': valid_results[original_idx],
+                'strategy': valid_results[profitable_df.loc[min_dd_idx, '_position']],
                 'rank_by': 'min_drawdown_profitable',
                 'value': profitable_df.loc[min_dd_idx, 'max_drawdown']
             }
@@ -400,12 +443,28 @@ class ParameterOptimizer:
         if profitable_mask.any():
             profitable_df = results_df[profitable_mask]
             max_bets_idx = profitable_df['total_bets'].idxmax()
-            original_idx = profitable_df.index[max_bets_idx]
             best_strategies['most_active_profitable'] = {
-                'strategy': valid_results[original_idx],
+                'strategy': valid_results[profitable_df.loc[max_bets_idx, '_position']],
                 'rank_by': 'most_bets_profitable',
                 'value': profitable_df.loc[max_bets_idx, 'total_bets']
             }
+        
+        # Primary target strategy
+        if primary_target != 'roi' and primary_target in results_df.columns:
+            if primary_target == 'sharpe':
+                primary_target = 'sharpe_ratio'
+            elif primary_target == 'risk_adjusted':
+                primary_target = 'risk_adjusted_return'
+            
+            primary_idx = results_df[primary_target].idxmax()
+            best_strategies['primary_target'] = {
+                'strategy': valid_results[results_df.loc[primary_idx, '_position']],
+                'rank_by': primary_target,
+                'value': results_df.loc[primary_idx, primary_target]
+            }
+        
+        logger.info(f"🏆 Found {len(best_strategies)} best strategy categories")
+        return best_strategies
         
         # Primary target strategy
         if primary_target != 'roi' and primary_target in results_df.columns:
@@ -636,18 +695,18 @@ class ParameterOptimizer:
         return "\n".join(report_lines)
 
 
-def run_quick_optimization():
+def run_quick_optimization(search_type: str = 'quick'):
     """Quick optimization test function"""
-    logger.info("🚀 Running quick parameter optimization test...")
+    logger.info(f"🚀 Running {search_type} parameter optimization test...")
     
     optimizer = ParameterOptimizer(
         elo_model_path='models/elo_model_trained_2024.pkl',
         initial_bankroll=10000.0
     )
     
-    # Run quick optimization
+    # Run optimization with specified search type
     results = optimizer.optimize_parameters(
-        search_type='quick',
+        search_type=search_type,
         optimization_target='roi',
         min_bets_threshold=20
     )
@@ -659,7 +718,7 @@ def run_quick_optimization():
     summary_report = optimizer.generate_summary_report(results)
     print("\n" + summary_report)
     
-    logger.info(f"✅ Quick optimization completed! Results saved to {output_file}")
+    logger.info(f"✅ {search_type.title()} optimization completed! Results saved to {output_file}")
     return results
 
 
@@ -668,5 +727,6 @@ if __name__ == "__main__":
     # Create logs directory
     os.makedirs('logs', exist_ok=True)
     
-    # Run quick optimization test
-    results = run_quick_optimization()
+    # Run optimization test
+    # Change to 'focused' or 'comprehensive' for more thorough search
+    results = run_quick_optimization('focused')
