@@ -695,30 +695,45 @@ class ParameterOptimizer:
         return "\n".join(report_lines)
 
 
-def run_quick_optimization(search_type: str = 'quick'):
-    """Quick optimization test function"""
-    logger.info(f"🚀 Running {search_type} parameter optimization test...")
+def run_quick_optimization(search_type: str = 'quick', 
+                          optimization_target: str = 'roi',
+                          min_bets_threshold: int = 20):
+    """
+    Optimization test function with flexible parameters
+    
+    Args:
+        search_type: 'quick', 'focused', or 'comprehensive'
+        optimization_target: 'roi', 'sharpe', 'risk_adjusted', or 'profit'
+        min_bets_threshold: Minimum number of bets for valid strategy
+    """
+    logger.info(f"🚀 Running {search_type} parameter optimization...")
+    logger.info(f"   Target: {optimization_target}")
+    logger.info(f"   Min bets: {min_bets_threshold}")
     
     optimizer = ParameterOptimizer(
         elo_model_path='models/elo_model_trained_2024.pkl',
         initial_bankroll=10000.0
     )
     
-    # Run optimization with specified search type
+    # Run optimization with specified parameters
     results = optimizer.optimize_parameters(
         search_type=search_type,
-        optimization_target='roi',
-        min_bets_threshold=20
+        optimization_target=optimization_target,
+        min_bets_threshold=min_bets_threshold
     )
     
-    # Save results
-    output_file = optimizer.save_optimization_results(results)
+    # Save results with target in filename
+    output_file = optimizer.save_optimization_results(
+        results, 
+        filename_prefix=f'optimization_{optimization_target}_{search_type}'
+    )
     
     # Generate and print summary
     summary_report = optimizer.generate_summary_report(results)
     print("\n" + summary_report)
     
-    logger.info(f"✅ {search_type.title()} optimization completed! Results saved to {output_file}")
+    logger.info(f"✅ {search_type.title()} optimization ({optimization_target}) completed!")
+    logger.info(f"📁 Results saved to {output_file}")
     return results
 
 
@@ -727,6 +742,18 @@ if __name__ == "__main__":
     # Create logs directory
     os.makedirs('logs', exist_ok=True)
     
-    # Run optimization test
-    # Change to 'focused' or 'comprehensive' for more thorough search
-    results = run_quick_optimization('focused')
+    # 🎯 EASY CONFIGURATION - Change these parameters:
+    SEARCH_TYPE = 'comprehensive'           # 'quick', 'focused', 'comprehensive'
+    OPTIMIZATION_TARGET = 'roi'     # Options:
+                                    #   'roi' - maximize return on investment
+                                    #   'sharpe' - maximize risk-adjusted returns (Sharpe ratio)
+                                    #   'risk_adjusted' - maximize ROI/drawdown ratio
+                                    #   'profit' - maximize absolute profit
+    MIN_BETS = 20                   # Minimum bets threshold for valid strategy
+    
+    # Run optimization
+    results = run_quick_optimization(
+        search_type=SEARCH_TYPE,
+        optimization_target=OPTIMIZATION_TARGET,
+        min_bets_threshold=MIN_BETS
+    )
