@@ -63,6 +63,23 @@ class PerformanceAnalyzer:
         logger.info(f"📊 PerformanceAnalyzer initialized")
         logger.info(f"   Results directory: {results_dir}")
         
+    def detect_results_format(self, results: Dict[str, Any]) -> str:
+        """
+        Detect the format of results file
+        
+        Args:
+            results: Loaded results dictionary
+            
+        Returns:
+            Format type: 'backtest_single', 'optimization_multi', or 'unknown'
+        """
+        if 'bet_history' in results and 'gaming_day_results' in results:
+            return 'backtest_single'
+        elif 'optimization_results' in results and 'best_strategies' in results:
+            return 'optimization_multi'
+        else:
+            return 'unknown'
+    
     def load_backtest_results(self, 
                             result_file: Optional[str] = None,
                             pattern: str = '*backtest*.json') -> Dict[str, Any]:
@@ -74,7 +91,7 @@ class PerformanceAnalyzer:
             pattern: File pattern to search for
             
         Returns:
-            Loaded results dictionary
+            Loaded results dictionary with format detection
         """
         if result_file is None:
             # Search for multiple patterns to find all relevant files
@@ -116,14 +133,33 @@ class PerformanceAnalyzer:
         with open(result_file, 'r', encoding='utf-8') as f:
             results = json.load(f)
         
-        logger.info(f"✅ Results loaded from {os.path.basename(result_file)}")
+        # Detect format
+        results_format = self.detect_results_format(results)
+        results['_format_detected'] = results_format
         
-        # Extract key information
-        if 'bet_history' in results:
-            logger.info(f"   Total bets: {len(results['bet_history']):,}")
-        if 'performance' in results:
-            roi = results['performance'].get('roi', 0)
-            logger.info(f"   ROI: {roi:+.2%}")
+        logger.info(f"✅ Results loaded from {os.path.basename(result_file)}")
+        logger.info(f"📊 Format detected: {results_format}")
+        
+        # Extract key information based on format
+        if results_format == 'backtest_single':
+            if 'bet_history' in results:
+                logger.info(f"   Total bets: {len(results['bet_history']):,}")
+            if 'performance' in results:
+                roi = results['performance'].get('roi', 0)
+                logger.info(f"   ROI: {roi:+.2%}")
+        
+        elif results_format == 'optimization_multi':
+            if 'optimization_results' in results:
+                valid_results = [r for r in results['optimization_results'] if 'error' not in r]
+                logger.info(f"   Optimization strategies: {len(valid_results):,}")
+            if 'best_strategies' in results:
+                logger.info(f"   Best strategy categories: {len(results['best_strategies'])}")
+                
+                # Show best ROI strategy
+                best_roi = results['best_strategies'].get('best_roi', {})
+                if best_roi and 'strategy' in best_roi:
+                    roi = best_roi['strategy'].get('performance', {}).get('roi', 0)
+                    logger.info(f"   Best ROI found: {roi:+.2%}")
         
         return results
     
@@ -778,7 +814,7 @@ class PerformanceAnalyzer:
         Generate comprehensive performance analysis report
         
         Args:
-            results: Backtesting results dictionary
+            results: Results dictionary (backtest_single or optimization_multi)
             include_quarterly: Include quarterly breakdown analysis
             include_risk: Include risk analysis
             include_model: Include model performance analysis
@@ -788,50 +824,99 @@ class PerformanceAnalyzer:
         """
         logger.info("📋 Generating comprehensive performance report...")
         
+        results_format = results.get('_format_detected', 'unknown')
+        
         report = {
             'report_metadata': {
                 'generated_at': datetime.now().isoformat(),
                 'analysis_components': [],
-                'results_summary': {
-                    'roi': results.get('performance', {}).get('roi', 0),
-                    'total_bets': results.get('statistics', {}).get('total_bets', 0),
-                    'win_rate': results.get('performance', {}).get('win_rate', 0),
-                    'max_drawdown': results.get('performance', {}).get('max_drawdown', 0)
-                }
+                'results_format': results_format,
+                'results_summary': {}
             }
         }
         
-        # Quarterly analysis
-        if include_quarterly:
-            try:
-                report['quarterly_analysis'] = self.analyze_quarterly_performance(results)
-                report['report_metadata']['analysis_components'].append('quarterly_breakdown')
-                logger.info("✅ Quarterly analysis included")
-            except Exception as e:
-                logger.warning(f"⚠️ Quarterly analysis failed: {e}")
-                report['quarterly_analysis'] = {'error': str(e)}
+        # Handle different result formats
+        if results_format == 'backtest_single':
+            # Original analysis for single backtest results
+            report['report_metadata']['results_summary'] = {
+                'roi': results.get('performance', {}).get('roi', 0),
+                'total_bets': results.get('statistics', {}).get('total_bets', 0),
+                'win_rate': results.get('performance', {}).get('win_rate', 0),
+                'max_drawdown': results.get('performance', {}).get('max_drawdown', 0)
+            }
+            
+            # Original analysis methods
+            if include_quarterly:
+                try:
+                    report['quarterly_analysis'] = self.analyze_quarterly_performance(results)
+                    report['report_metadata']['analysis_components'].append('quarterly_breakdown')
+                    logger.info("✅ Quarterly analysis included")
+                except Exception as e:
+                    logger.warning(f"⚠️ Quarterly analysis failed: {e}")
+                    report['quarterly_analysis'] = {'error': str(e)}
+            
+            if include_risk:
+                try:
+                    report['risk_analysis'] = self.analyze_risk_metrics(results)
+                    report['report_metadata']['analysis_components'].append('risk_metrics')
+                    logger.info("✅ Risk analysis included")
+                except Exception as e:
+                    logger.warning(f"⚠️ Risk analysis failed: {e}")
+                    report['risk_analysis'] = {'error': str(e)}
+            
+            if include_model:
+                try:
+                    report['model_analysis'] = self.analyze_model_performance(results)
+                    report['report_metadata']['analysis_components'].append('model_performance')
+                    logger.info("✅ Model analysis included")
+                except Exception as e:
+                    logger.warning(f"⚠️ Model analysis failed: {e}")
+                    report['model_analysis'] = {'error': str(e)}
         
-        # Risk analysis
-        if include_risk:
+        elif results_format == 'optimization_multi':
+            # Analysis for optimization results
             try:
-                report['risk_analysis'] = self.analyze_risk_metrics(results)
-                report['report_metadata']['analysis_components'].append('risk_metrics')
-                logger.info("✅ Risk analysis included")
+                # Strategy comparison analysis
+                report['strategy_comparison'] = self.analyze_strategy_comparison(results)
+                report['report_metadata']['analysis_components'].append('strategy_comparison')
+                logger.info("✅ Strategy comparison analysis included")
+                
+                # Best strategies summary
+                report['best_strategies_analysis'] = self.analyze_best_strategies(results)
+                report['report_metadata']['analysis_components'].append('best_strategies')
+                logger.info("✅ Best strategies analysis included")
+                
+                # Parameter sensitivity analysis
+                report['parameter_analysis'] = self.analyze_parameter_sensitivity(results)
+                report['report_metadata']['analysis_components'].append('parameter_sensitivity')
+                logger.info("✅ Parameter sensitivity analysis included")
+                
+                # Summary from best strategy
+                if 'best_strategies' in results and 'best_roi' in results['best_strategies']:
+                    best_strategy = results['best_strategies']['best_roi']['strategy']
+                    report['report_metadata']['results_summary'] = {
+                        'best_roi': best_strategy.get('performance', {}).get('roi', 0),
+                        'best_roi_bets': best_strategy.get('statistics', {}).get('total_bets', 0),
+                        'best_roi_win_rate': best_strategy.get('performance', {}).get('win_rate', 0),
+                        'best_roi_drawdown': best_strategy.get('performance', {}).get('max_drawdown', 0),
+                        'total_strategies_tested': len(results.get('optimization_results', []))
+                    }
+                
             except Exception as e:
-                logger.warning(f"⚠️ Risk analysis failed: {e}")
-                report['risk_analysis'] = {'error': str(e)}
+                logger.warning(f"⚠️ Optimization analysis failed: {e}")
+                report['optimization_analysis'] = {'error': str(e)}
         
-        # Model performance analysis
-        if include_model:
-            try:
-                report['model_analysis'] = self.analyze_model_performance(results)
-                report['report_metadata']['analysis_components'].append('model_performance')
-                logger.info("✅ Model analysis included")
-            except Exception as e:
-                logger.warning(f"⚠️ Model analysis failed: {e}")
-                report['model_analysis'] = {'error': str(e)}
+        else:
+            # Unknown format
+            report['analysis_error'] = {
+                'message': f'Unknown results format: {results_format}',
+                'expected_formats': ['backtest_single', 'optimization_multi'],
+                'available_keys': list(results.keys())
+            }
+            logger.warning(f"⚠️ Unknown results format: {results_format}")
         
-        logger.info(f"📊 Comprehensive report generated with {len(report['report_metadata']['analysis_components'])} components")
+        component_count = len(report['report_metadata']['analysis_components'])
+        logger.info(f"📊 Comprehensive report generated with {component_count} components")
         
         return report
     
@@ -861,7 +946,255 @@ class PerformanceAnalyzer:
             json.dump(analysis, f, indent=2, default=str)
         
         logger.info(f"💾 Analysis results saved to {main_file}")
-        return main_file
+    def analyze_best_strategies(self, results: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Analyze best strategies from optimization results
+        
+        Args:
+            results: Optimization results dictionary
+            
+        Returns:
+            Best strategies analysis
+        """
+        logger.info("🏆 Analyzing best strategies from optimization...")
+        
+        if not results.get('best_strategies'):
+            return {'error': 'No best strategies found in optimization results'}
+        
+        best_strategies = results['best_strategies']
+        analysis = {
+            'strategy_categories': {},
+            'parameter_patterns': {},
+            'performance_comparison': {},
+            'recommendations': []
+        }
+        
+        # Analyze each category of best strategies
+        for category, strategy_info in best_strategies.items():
+            if 'strategy' not in strategy_info:
+                continue
+                
+            strategy = strategy_info['strategy']
+            params = strategy.get('parameters', {})
+            perf = strategy.get('performance', {})
+            stats = strategy.get('statistics', {})
+            
+            category_analysis = {
+                'optimization_criterion': strategy_info.get('rank_by', 'unknown'),
+                'criterion_value': strategy_info.get('value', 0),
+                'parameters': params,
+                'performance_metrics': {
+                    'roi': perf.get('roi', 0),
+                    'win_rate': perf.get('win_rate', 0),
+                    'max_drawdown': perf.get('max_drawdown', 0),
+                    'sharpe_ratio': perf.get('sharpe_ratio', 0),
+                    'total_bets': stats.get('total_bets', 0),
+                    'profit': perf.get('profit', 0)
+                }
+            }
+            
+            analysis['strategy_categories'][category] = category_analysis
+        
+        # Find common parameter patterns among best strategies
+        param_values = {}
+        for category, strategy_info in best_strategies.items():
+            if 'strategy' not in strategy_info:
+                continue
+            params = strategy_info['strategy'].get('parameters', {})
+            for param, value in params.items():
+                if param not in param_values:
+                    param_values[param] = []
+                param_values[param].append(value)
+        
+        # Calculate parameter frequencies
+        for param, values in param_values.items():
+            if param in ['edge_threshold', 'min_odds', 'stake_size']:
+                # Numerical parameters
+                analysis['parameter_patterns'][param] = {
+                    'mean': np.mean(values) if values else 0,
+                    'median': np.median(values) if values else 0,
+                    'min': min(values) if values else 0,
+                    'max': max(values) if values else 0,
+                    'most_common': max(set(values), key=values.count) if values else None
+                }
+            else:
+                # Categorical parameters
+                from collections import Counter
+                value_counts = Counter(values)
+                analysis['parameter_patterns'][param] = {
+                    'most_common': value_counts.most_common(1)[0] if value_counts else None,
+                    'distribution': dict(value_counts)
+                }
+        
+        # Performance comparison between categories
+        roi_values = []
+        drawdown_values = []
+        for category, cat_analysis in analysis['strategy_categories'].items():
+            roi = cat_analysis['performance_metrics']['roi']
+            drawdown = cat_analysis['performance_metrics']['max_drawdown']
+            roi_values.append(roi)
+            drawdown_values.append(drawdown)
+        
+        if roi_values:
+            analysis['performance_comparison'] = {
+                'roi_range': {'min': min(roi_values), 'max': max(roi_values)},
+                'drawdown_range': {'min': min(drawdown_values), 'max': max(drawdown_values)},
+                'best_overall_roi': max(roi_values),
+                'lowest_risk': min(drawdown_values)
+            }
+        
+        # Generate recommendations
+        recommendations = []
+        
+        # Edge threshold recommendation
+        edge_pattern = analysis['parameter_patterns'].get('edge_threshold', {})
+        if edge_pattern:
+            recommended_edge = edge_pattern.get('median', 0)
+            recommendations.append({
+                'parameter': 'edge_threshold',
+                'recommendation': f"Use edge threshold around {recommended_edge:.1%}",
+                'reasoning': f"Median of best strategies: {recommended_edge:.1%}"
+            })
+        
+        # Stake method recommendation
+        stake_pattern = analysis['parameter_patterns'].get('stake_method', {})
+        if stake_pattern and 'most_common' in stake_pattern:
+            most_common_stake = stake_pattern['most_common']
+            if most_common_stake:
+                recommendations.append({
+                    'parameter': 'stake_method',
+                    'recommendation': f"Use {most_common_stake[0]} staking method",
+                    'reasoning': f"Used in {most_common_stake[1]} out of {len(best_strategies)} best strategies"
+                })
+        
+        analysis['recommendations'] = recommendations
+        
+        logger.info(f"✅ Best strategies analysis completed:")
+        logger.info(f"   Categories analyzed: {len(analysis['strategy_categories'])}")
+        logger.info(f"   Recommendations generated: {len(recommendations)}")
+        
+        return analysis
+    
+    def analyze_parameter_sensitivity(self, results: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Analyze parameter sensitivity from optimization results
+        
+        Args:
+            results: Optimization results dictionary
+            
+        Returns:
+            Parameter sensitivity analysis
+        """
+        logger.info("📈 Analyzing parameter sensitivity...")
+        
+        if not results.get('optimization_results'):
+            return {'error': 'No optimization results found'}
+        
+        # Convert optimization results to DataFrame
+        opt_data = []
+        for result in results['optimization_results']:
+            if 'error' not in result and result.get('statistics', {}).get('total_bets', 0) > 0:
+                row = {
+                    **result['parameters'],
+                    **result['performance'],
+                    **result['statistics']
+                }
+                opt_data.append(row)
+        
+        if not opt_data:
+            return {'error': 'No valid optimization results found'}
+        
+        df = pd.DataFrame(opt_data)
+        
+        analysis = {
+            'parameter_correlations': {},
+            'performance_by_parameter': {},
+            'optimal_ranges': {},
+            'sensitivity_ranking': {}
+        }
+        
+        # Calculate correlations with ROI
+        numeric_params = ['edge_threshold', 'min_odds', 'stake_size']
+        target_metrics = ['roi', 'max_drawdown', 'sharpe_ratio', 'total_bets']
+        
+        correlations = {}
+        for param in numeric_params:
+            if param in df.columns:
+                param_correlations = {}
+                for metric in target_metrics:
+                    if metric in df.columns:
+                        corr = df[param].corr(df[metric])
+                        param_correlations[metric] = corr if not pd.isna(corr) else 0
+                correlations[param] = param_correlations
+        
+        analysis['parameter_correlations'] = correlations
+        
+        # Performance by parameter value
+        for param in numeric_params + ['stake_method', 'ev_method']:
+            if param not in df.columns:
+                continue
+                
+            if param in numeric_params:
+                # Numerical parameters - create bins
+                try:
+                    bins = pd.qcut(df[param], q=5, duplicates='drop')
+                    grouped = df.groupby(bins)
+                except:
+                    # Fallback to equal-width bins
+                    bins = pd.cut(df[param], bins=5)
+                    grouped = df.groupby(bins)
+            else:
+                # Categorical parameters
+                grouped = df.groupby(param)
+            
+            param_performance = {}
+            for group_name, group_data in grouped:
+                if len(group_data) > 0:
+                    param_performance[str(group_name)] = {
+                        'count': len(group_data),
+                        'avg_roi': group_data['roi'].mean(),
+                        'avg_drawdown': group_data['max_drawdown'].mean(),
+                        'avg_bets': group_data['total_bets'].mean(),
+                        'profitable_strategies': (group_data['roi'] > 0).sum()
+                    }
+            
+            analysis['performance_by_parameter'][param] = param_performance
+        
+        # Find optimal ranges for numerical parameters
+        for param in numeric_params:
+            if param not in df.columns:
+                continue
+            
+            # Find range of top 10% strategies by ROI
+            top_10_pct = df.nlargest(max(1, len(df) // 10), 'roi')
+            if len(top_10_pct) > 0:
+                analysis['optimal_ranges'][param] = {
+                    'min': top_10_pct[param].min(),
+                    'max': top_10_pct[param].max(),
+                    'median': top_10_pct[param].median(),
+                    'recommendation': f"{top_10_pct[param].median():.3f}"
+                }
+        
+        # Rank parameters by their impact on ROI (absolute correlation)
+        roi_impacts = {}
+        for param, corrs in correlations.items():
+            roi_impact = abs(corrs.get('roi', 0))
+            roi_impacts[param] = roi_impact
+        
+        # Sort by impact
+        sensitivity_ranking = sorted(roi_impacts.items(), key=lambda x: x[1], reverse=True)
+        analysis['sensitivity_ranking'] = {
+            'ranking': sensitivity_ranking,
+            'most_impactful': sensitivity_ranking[0] if sensitivity_ranking else None,
+            'least_impactful': sensitivity_ranking[-1] if sensitivity_ranking else None
+        }
+        
+        logger.info(f"✅ Parameter sensitivity analysis completed:")
+        logger.info(f"   Parameters analyzed: {len(correlations)}")
+        if sensitivity_ranking:
+            logger.info(f"   Most impactful parameter: {sensitivity_ranking[0][0]} (correlation: {sensitivity_ranking[0][1]:.3f})")
+        
+        return analysis
 
 
 def run_comprehensive_analysis(results_file: Optional[str] = None, 
