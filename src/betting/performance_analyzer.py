@@ -21,9 +21,9 @@ import numpy as np
 import os
 import json
 import logging
+import glob
 from datetime import datetime, date
 from typing import Dict, List, Tuple, Any, Optional, Union
-import glob
 from scipy import stats
 import warnings
 
@@ -77,16 +77,40 @@ class PerformanceAnalyzer:
             Loaded results dictionary
         """
         if result_file is None:
-            # Find latest results file
-            search_pattern = os.path.join(self.results_dir, pattern)
-            files = glob.glob(search_pattern)
+            # Search for multiple patterns to find all relevant files
+            patterns = [
+                '*backtest*.json',
+                '*optimization*.json', 
+                '*results*.json'
+            ]
             
-            if not files:
-                raise FileNotFoundError(f"No results files found matching: {search_pattern}")
+            all_files = []
+            for search_pattern in patterns:
+                full_pattern = os.path.join(self.results_dir, search_pattern)
+                files = glob.glob(full_pattern)
+                all_files.extend(files)
+            
+            # Remove duplicates and sort by modification time
+            all_files = list(set(all_files))
+            
+            if not all_files:
+                raise FileNotFoundError(f"No results files found in: {self.results_dir}")
             
             # Sort by modification time, get latest
-            result_file = max(files, key=os.path.getmtime)
-            logger.info(f"📁 Auto-selected latest results: {os.path.basename(result_file)}")
+            all_files.sort(key=os.path.getmtime, reverse=True)
+            
+            # Show available files for user info
+            logger.info(f"📁 Found {len(all_files)} results files:")
+            for i, file in enumerate(all_files[:5]):  # Show top 5
+                file_time = datetime.fromtimestamp(os.path.getmtime(file))
+                age_indicator = "🆕" if i == 0 else "📄"
+                logger.info(f"   {age_indicator} {os.path.basename(file)} ({file_time.strftime('%Y-%m-%d %H:%M')})")
+            
+            if len(all_files) > 5:
+                logger.info(f"   ... and {len(all_files) - 5} more files")
+            
+            result_file = all_files[0]  # Latest file
+            logger.info(f"🎯 Selected: {os.path.basename(result_file)}")
         
         # Load results
         with open(result_file, 'r', encoding='utf-8') as f:
@@ -461,9 +485,10 @@ class PerformanceAnalyzer:
             var_95 = var_99 = es_95 = es_99 = 0
         
         # Longest losing streak
-        bet_df['loss_streak'] = (~bet_df['bet_won']).astype(int)
-        bet_df['streak_id'] = (bet_df['bet_won'] != bet_df['bet_won'].shift()).cumsum()
-        losing_streaks = bet_df[~bet_df['bet_won']].groupby('streak_id').size()
+        bet_df['bet_won_clean'] = bet_df['bet_won'].fillna(False)  # Handle NaN values
+        bet_df['loss_streak'] = (~bet_df['bet_won_clean']).astype(int)
+        bet_df['streak_id'] = (bet_df['bet_won_clean'] != bet_df['bet_won_clean'].shift()).cumsum()
+        losing_streaks = bet_df[~bet_df['bet_won_clean']].groupby('streak_id').size()
         max_losing_streak = losing_streaks.max() if len(losing_streaks) > 0 else 0
         
         # Bet size analysis
@@ -488,8 +513,8 @@ class PerformanceAnalyzer:
         
         # Win/loss pattern analysis
         win_loss_patterns = {
-            'consecutive_wins_max': self._calculate_max_consecutive(bet_df['bet_won']),
-            'consecutive_losses_max': self._calculate_max_consecutive(~bet_df['bet_won']),
+            'consecutive_wins_max': self._calculate_max_consecutive(bet_df['bet_won_clean']),
+            'consecutive_losses_max': self._calculate_max_consecutive(~bet_df['bet_won_clean']),
             'win_after_loss_rate': self._calculate_conditional_probability(bet_df, 'loss_then_win'),
             'loss_after_win_rate': self._calculate_conditional_probability(bet_df, 'win_then_loss')
         }
@@ -562,10 +587,13 @@ class PerformanceAnalyzer:
         if len(bet_df) < 2:
             return 0.0
         
+        # Use cleaned boolean column
+        bet_won_clean = bet_df['bet_won'].fillna(False)
+        
         if pattern == 'loss_then_win':
             # P(Win | Previous Loss)
-            prev_loss = ~bet_df['bet_won'].shift(1)
-            current_win = bet_df['bet_won']
+            prev_loss = ~bet_won_clean.shift(1)
+            current_win = bet_won_clean
             valid_mask = prev_loss.notna()
             
             if valid_mask.sum() == 0:
@@ -575,8 +603,8 @@ class PerformanceAnalyzer:
         
         elif pattern == 'win_then_loss':
             # P(Loss | Previous Win)
-            prev_win = bet_df['bet_won'].shift(1)
-            current_loss = ~bet_df['bet_won']
+            prev_win = bet_won_clean.shift(1)
+            current_loss = ~bet_won_clean
             valid_mask = prev_win.notna()
             
             if valid_mask.sum() == 0:
@@ -836,11 +864,46 @@ class PerformanceAnalyzer:
         return main_file
 
 
-def run_comprehensive_analysis(results_file: Optional[str] = None):
-    """Run comprehensive performance analysis"""
+def run_comprehensive_analysis(results_file: Optional[str] = None, 
+                              show_available_files: bool = False):
+    """
+    Run comprehensive performance analysis
+    
+    Args:
+        results_file: Specific file to analyze (None = auto-select latest)
+        show_available_files: If True, show all available files and prompt for selection
+    """
     logger.info("🚀 Starting comprehensive performance analysis...")
     
     analyzer = PerformanceAnalyzer()
+    
+    # Show available files if requested
+    if show_available_files and results_file is None:
+        patterns = ['*backtest*.json', '*optimization*.json', '*results*.json']
+        all_files = []
+        for pattern in patterns:
+            full_pattern = os.path.join(analyzer.results_dir, pattern)
+            files = glob.glob(full_pattern)
+            all_files.extend(files)
+        
+        all_files = list(set(all_files))
+        all_files.sort(key=os.path.getmtime, reverse=True)
+        
+        if all_files:
+            print("\n📁 Available results files:")
+            for i, file in enumerate(all_files):
+                file_time = datetime.fromtimestamp(os.path.getmtime(file))
+                print(f"   {i+1}. {os.path.basename(file)} ({file_time.strftime('%Y-%m-%d %H:%M')})")
+            
+            try:
+                choice = input(f"\nSelect file (1-{len(all_files)}) or press Enter for latest: ").strip()
+                if choice:
+                    idx = int(choice) - 1
+                    if 0 <= idx < len(all_files):
+                        results_file = all_files[idx]
+                        print(f"Selected: {os.path.basename(results_file)}")
+            except (ValueError, IndexError):
+                print("Invalid selection, using latest file")
     
     # Load results
     results = analyzer.load_backtest_results(results_file)
@@ -865,5 +928,12 @@ if __name__ == "__main__":
     # Create logs directory
     os.makedirs('logs', exist_ok=True)
     
+    # 🎯 CONFIGURATION:
+    SHOW_FILE_SELECTION = True  # Set to True to see all available files
+    SPECIFIC_FILE = None        # Or specify exact file: 'backtest_results_20250721_123456.json'
+    
     # Run comprehensive analysis
-    report, output_file = run_comprehensive_analysis()
+    report, output_file = run_comprehensive_analysis(
+        results_file=SPECIFIC_FILE,
+        show_available_files=SHOW_FILE_SELECTION
+    )
