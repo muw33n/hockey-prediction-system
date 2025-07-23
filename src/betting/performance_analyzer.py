@@ -475,140 +475,149 @@ class PerformanceAnalyzer:
         
         return analysis
     
-    def analyze_risk_metrics(self, bet_df: pd.DataFrame) -> Dict:
+    def analyze_risk_metrics(self, results: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Analyze comprehensive risk metrics with proper NaN handling
-        
-        Fixes the boolean operation error by ensuring all bet_won operations
-        use properly cleaned boolean series.
-        """
-        try:
-            # ✅ KRITICKÁ OPRAVA: Důsledné čištění NaN hodnot na začátku
-            bet_df_clean = bet_df.copy()
-            
-            # Ujistíme se, že bet_won je boolean bez NaN
-            bet_df_clean['bet_won_clean'] = bet_df_clean['bet_won'].fillna(False).astype(bool)
-            bet_df_clean['bet_lost_clean'] = ~bet_df_clean['bet_won_clean']  # Nyní bezpečná negace
-            
-            # Základní risk metrics
-            total_bets = len(bet_df_clean)
-            if total_bets == 0:
-                return self._empty_risk_metrics()
-            
-            # Win/Loss statistiky s cleaned data
-            total_wins = bet_df_clean['bet_won_clean'].sum()
-            total_losses = bet_df_clean['bet_lost_clean'].sum()
-            win_rate = total_wins / total_bets if total_bets > 0 else 0
-            
-            # Profit/Loss analysis
-            bet_df_clean['pnl'] = bet_df_clean.apply(
-                lambda row: (row['odds'] - 1) * row['stake'] if row['bet_won_clean'] 
-                        else -row['stake'], axis=1
-            )
-            
-            # Cumulative P&L pro drawdown calculation
-            bet_df_clean['cumulative_pnl'] = bet_df_clean['pnl'].cumsum()
-            
-            # Drawdown analysis - používáme cleaned data
-            peak_pnl = bet_df_clean['cumulative_pnl'].expanding().max()
-            drawdown = peak_pnl - bet_df_clean['cumulative_pnl']
-            max_drawdown = drawdown.max()
-            max_drawdown_pct = (max_drawdown / peak_pnl.max()) if peak_pnl.max() > 0 else 0
-            
-            # Longest winning/losing streaks - používáme cleaned boolean series
-            max_win_streak = self._calculate_max_consecutive(bet_df_clean['bet_won_clean'])
-            max_loss_streak = self._calculate_max_consecutive(bet_df_clean['bet_lost_clean'])
-            
-            # Volatility metrics
-            daily_returns = bet_df_clean.groupby(bet_df_clean.index.date if hasattr(bet_df_clean.index, 'date') 
-                                            else bet_df_clean.get('date', bet_df_clean.index))['pnl'].sum()
-            volatility = daily_returns.std() if len(daily_returns) > 1 else 0
-            
-            # Value at Risk (95% confidence)
-            var_95 = daily_returns.quantile(0.05) if len(daily_returns) > 0 else 0
-            
-            # Sharpe ratio approximation
-            mean_daily_return = daily_returns.mean() if len(daily_returns) > 0 else 0
-            sharpe_ratio = (mean_daily_return / volatility) if volatility > 0 else 0
-            
-            # Risk metrics dictionary
-            risk_metrics = {
-                'total_bets': total_bets,
-                'win_rate': win_rate,
-                'total_wins': int(total_wins),
-                'total_losses': int(total_losses),
-                'max_drawdown': max_drawdown,
-                'max_drawdown_pct': max_drawdown_pct,
-                'max_win_streak': max_win_streak,
-                'max_loss_streak': max_loss_streak,
-                'volatility': volatility,
-                'var_95': var_95,
-                'sharpe_ratio': sharpe_ratio,
-                'total_pnl': bet_df_clean['pnl'].sum(),
-                'average_bet_size': bet_df_clean['stake'].mean(),
-                'largest_win': bet_df_clean['pnl'].max(),
-                'largest_loss': bet_df_clean['pnl'].min()
-            }
-            
-            logger.info(f"✅ Risk analysis completed successfully")
-            logger.info(f"   Total bets: {total_bets:,}")
-            logger.info(f"   Win rate: {win_rate:.1%}")
-            logger.info(f"   Max drawdown: {max_drawdown_pct:.1%}")
-            logger.info(f"   Max loss streak: {max_loss_streak}")
-            
-            return risk_metrics
-            
-        except Exception as e:
-            logger.error(f"❌ Risk analysis failed: {str(e)}")
-            logger.error(f"   Error type: {type(e).__name__}")
-            logger.error(f"   Bet DataFrame shape: {bet_df.shape if bet_df is not None else 'None'}")
-            if hasattr(bet_df, 'columns'):
-                logger.error(f"   Available columns: {list(bet_df.columns)}")
-            return self._empty_risk_metrics()
-    
-    def _calculate_max_consecutive(self, boolean_series: pd.Series) -> int:
-        """
-        Calculate maximum consecutive True values in boolean series
+        Comprehensive risk analysis of backtesting results
         
         Args:
-            boolean_series: Cleaned boolean series (no NaN values)
+            results: Backtesting results dictionary
             
         Returns:
-            int: Maximum consecutive count
+            Risk analysis results
         """
-        if len(boolean_series) == 0:
+        logger.info("⚠️ Analyzing comprehensive risk metrics...")
+        
+        if not results.get('bet_history'):
+            return {'error': 'No bet history found in results'}
+        
+        bet_df = pd.DataFrame(results['bet_history'])
+        bet_df['date'] = pd.to_datetime(bet_df['date'])
+        
+        # Daily P&L calculation
+        daily_pnl = bet_df.groupby(bet_df['date'].dt.date).agg({
+            'net_result': 'sum',
+            'stake': 'sum',
+            'payout': 'sum'
+        }).reset_index()
+        
+        daily_pnl['cumulative_pnl'] = daily_pnl['net_result'].cumsum()
+        daily_pnl['daily_roi'] = daily_pnl['net_result'] / daily_pnl['stake']
+        
+        # Drawdown analysis
+        running_max = daily_pnl['cumulative_pnl'].cummax()
+        drawdown = daily_pnl['cumulative_pnl'] - running_max
+        drawdown_pct = drawdown / abs(running_max).replace(0, 1)
+        
+        # Value at Risk (VaR) calculations
+        daily_returns = daily_pnl['daily_roi'].dropna()
+        if len(daily_returns) > 0:
+            var_95 = np.percentile(daily_returns, 5)  # 5th percentile (95% VaR)
+            var_99 = np.percentile(daily_returns, 1)  # 1st percentile (99% VaR)
+            
+            # Expected Shortfall (Conditional VaR)
+            es_95 = daily_returns[daily_returns <= var_95].mean()
+            es_99 = daily_returns[daily_returns <= var_99].mean()
+        else:
+            var_95 = var_99 = es_95 = es_99 = 0
+        
+        # Longest losing streak
+        bet_df['bet_won_clean'] = bet_df['bet_won'].fillna(False)  # Handle NaN values
+        bet_df['loss_streak'] = (~bet_df['bet_won_clean']).astype(int)
+        bet_df['streak_id'] = (bet_df['bet_won_clean'] != bet_df['bet_won_clean'].shift()).cumsum()
+        losing_streaks = bet_df[~bet_df['bet_won_clean']].groupby('streak_id').size()
+        max_losing_streak = losing_streaks.max() if len(losing_streaks) > 0 else 0
+        
+        # Bet size analysis
+        stake_analysis = {
+            'min_stake': bet_df['stake'].min(),
+            'max_stake': bet_df['stake'].max(),
+            'avg_stake': bet_df['stake'].mean(),
+            'median_stake': bet_df['stake'].median(),
+            'stake_std': bet_df['stake'].std(),
+            'stake_concentration': (bet_df['stake'] > bet_df['stake'].quantile(0.9)).sum() / len(bet_df)
+        }
+        
+        # Odds distribution analysis
+        odds_analysis = {
+            'min_odds': bet_df['odds'].min(),
+            'max_odds': bet_df['odds'].max(),
+            'avg_odds': bet_df['odds'].mean(),
+            'median_odds': bet_df['odds'].median(),
+            'low_odds_bets': (bet_df['odds'] < 1.5).sum() / len(bet_df),
+            'high_odds_bets': (bet_df['odds'] > 2.5).sum() / len(bet_df)
+        }
+        
+        # Win/loss pattern analysis
+        win_loss_patterns = {
+            'consecutive_wins_max': self._calculate_max_consecutive(bet_df['bet_won_clean']),
+            'consecutive_losses_max': self._calculate_max_consecutive(~bet_df['bet_won_clean']),
+            'win_after_loss_rate': self._calculate_conditional_probability(bet_df, 'loss_then_win'),
+            'loss_after_win_rate': self._calculate_conditional_probability(bet_df, 'win_then_loss')
+        }
+        
+        # Monthly risk metrics
+        monthly_risk = {}
+        if len(bet_df) > 30:  # At least a month of data
+            bet_df['month'] = bet_df['date'].dt.to_period('M')
+            monthly_pnl = bet_df.groupby('month')['net_result'].sum()
+            
+            monthly_risk = {
+                'monthly_volatility': monthly_pnl.std(),
+                'worst_month': monthly_pnl.min(),
+                'best_month': monthly_pnl.max(),
+                'negative_months': (monthly_pnl < 0).sum(),
+                'total_months': len(monthly_pnl)
+            }
+        
+        risk_analysis = {
+            'drawdown_metrics': {
+                'max_drawdown_absolute': abs(drawdown.min()),
+                'max_drawdown_percent': abs(drawdown_pct.min()),
+                'current_drawdown': drawdown.iloc[-1] if len(drawdown) > 0 else 0,
+                'drawdown_periods': (drawdown < 0).sum(),
+                'recovery_periods': self._calculate_recovery_periods(drawdown)
+            },
+            'var_metrics': {
+                'var_95_daily': var_95,
+                'var_99_daily': var_99,
+                'expected_shortfall_95': es_95,
+                'expected_shortfall_99': es_99
+            },
+            'streak_analysis': {
+                'max_losing_streak': max_losing_streak,
+                'avg_losing_streak': losing_streaks.mean() if len(losing_streaks) > 0 else 0,
+                'win_loss_patterns': win_loss_patterns
+            },
+            'stake_analysis': stake_analysis,
+            'odds_analysis': odds_analysis,
+            'monthly_risk': monthly_risk,
+            'analysis_date': datetime.now().isoformat()
+        }
+        
+        logger.info("✅ Risk analysis completed:")
+        logger.info(f"   Max drawdown: {abs(drawdown_pct.min()):.2%}")
+        logger.info(f"   VaR (95%): {var_95:+.2%}")
+        logger.info(f"   Max losing streak: {max_losing_streak}")
+        
+        return risk_analysis
+    
+    def _calculate_max_consecutive(self, series: pd.Series) -> int:
+        """Calculate maximum consecutive True values in a boolean series"""
+        if len(series) == 0:
             return 0
         
-        # Ensure it's boolean and clean
-        clean_series = boolean_series.astype(bool)
+        max_consecutive = 0
+        current_consecutive = 0
         
-        # Group by consecutive values
-        groups = (clean_series != clean_series.shift()).cumsum()
-        consecutive_counts = clean_series.groupby(groups).sum()
+        for value in series:
+            if value:
+                current_consecutive += 1
+                max_consecutive = max(max_consecutive, current_consecutive)
+            else:
+                current_consecutive = 0
         
-        # Return max consecutive True values
-        return int(consecutive_counts.max()) if len(consecutive_counts) > 0 else 0
-
-    def _empty_risk_metrics(self) -> Dict:
-        """Return empty risk metrics dict when analysis fails"""
-        return {
-            'total_bets': 0,
-            'win_rate': 0.0,
-            'total_wins': 0,
-            'total_losses': 0,
-            'max_drawdown': 0.0,
-            'max_drawdown_pct': 0.0,
-            'max_win_streak': 0,
-            'max_loss_streak': 0,
-            'volatility': 0.0,
-            'var_95': 0.0,
-            'sharpe_ratio': 0.0,
-            'total_pnl': 0.0,
-            'average_bet_size': 0.0,
-            'largest_win': 0.0,
-            'largest_loss': 0.0
-        }
-
+        return max_consecutive
+    
     def _calculate_conditional_probability(self, bet_df: pd.DataFrame, pattern: str) -> float:
         """Calculate conditional probabilities for win/loss patterns"""
         if len(bet_df) < 2:
