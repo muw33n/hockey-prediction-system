@@ -36,16 +36,29 @@ if current_dir not in sys.path:
 
 from backtesting_engine import BacktestingEngine
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('logs/top_strategy_generation.log', encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
+# Setup logging with unique logger name
+logger = logging.getLogger('TopStrategyGenerator')
+logger.setLevel(logging.INFO)
+
+# Remove existing handlers to avoid duplication
+for handler in logger.handlers[:]:
+    logger.removeHandler(handler)
+
+# Create handlers
+file_handler = logging.FileHandler('logs/top_strategy_generation.log', encoding='utf-8')
+console_handler = logging.StreamHandler()
+
+# Create formatter
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(formatter)
+console_handler.setFormatter(formatter)
+
+# Add handlers
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
+
+# Prevent propagation to root logger
+logger.propagate = False
 
 class TopStrategyGenerator:
     """
@@ -309,25 +322,64 @@ class TopStrategyGenerator:
                 
                 # Collect bet records with strategy ID
                 if 'bet_history' in result:
-                    bet_records = result['bet_history'].copy()
-                    bet_records['strategy_id'] = strategy_id
-                    bet_records['strategy_index'] = idx
-                    all_bet_records.append(bet_records)
+                    bet_history = result['bet_history']
+                    if isinstance(bet_history, list) and len(bet_history) > 0:
+                        # Convert list to DataFrame
+                        bet_records = pd.DataFrame(bet_history)
+                        bet_records['strategy_id'] = strategy_id
+                        bet_records['strategy_index'] = idx
+                        all_bet_records.append(bet_records)
+                    elif isinstance(bet_history, pd.DataFrame):
+                        # Already DataFrame
+                        bet_records = bet_history.copy()
+                        bet_records['strategy_id'] = strategy_id
+                        bet_records['strategy_index'] = idx
+                        all_bet_records.append(bet_records)
                 
-                # Collect daily records
+                # Collect daily performance records (financial metrics)
+                if 'daily_performance' in result:
+                    daily_performance = result['daily_performance']
+                    if isinstance(daily_performance, list) and len(daily_performance) > 0:
+                        # Convert list to DataFrame
+                        daily_records = pd.DataFrame(daily_performance)
+                        daily_records['strategy_id'] = strategy_id
+                        daily_records['strategy_index'] = idx
+                        all_daily_records.append(daily_records)
+                    elif isinstance(daily_performance, pd.DataFrame):
+                        # Already DataFrame
+                        daily_records = daily_performance.copy()
+                        daily_records['strategy_id'] = strategy_id
+                        daily_records['strategy_index'] = idx
+                        all_daily_records.append(daily_records)
+                
+                # Optionally collect gaming day results (game statistics) separately
                 if 'gaming_day_results' in result:
-                    daily_records = result['gaming_day_results'].copy()
-                    daily_records['strategy_id'] = strategy_id
-                    daily_records['strategy_index'] = idx
-                    all_daily_records.append(daily_records)
+                    gaming_day_results = result['gaming_day_results']
+                    if isinstance(gaming_day_results, list) and len(gaming_day_results) > 0:
+                        # Convert list to DataFrame
+                        gaming_records = pd.DataFrame(gaming_day_results)
+                        gaming_records['strategy_id'] = strategy_id
+                        gaming_records['strategy_index'] = idx
+                        # Store in separate list if needed for game analysis
+                        # all_gaming_records.append(gaming_records)  # Optional
                 
                 # Calculate monthly aggregation
                 if 'bet_history' in result:
-                    monthly_data = self._calculate_monthly_performance(
-                        result['bet_history'], strategy_id, idx
-                    )
-                    if monthly_data is not None:
-                        all_monthly_records.append(monthly_data)
+                    bet_history = result['bet_history']
+                    if isinstance(bet_history, list) and len(bet_history) > 0:
+                        # Convert to DataFrame for monthly calculation
+                        bet_df = pd.DataFrame(bet_history)
+                        monthly_data = self._calculate_monthly_performance(
+                            bet_df, strategy_id, idx
+                        )
+                        if monthly_data is not None:
+                            all_monthly_records.append(monthly_data)
+                    elif isinstance(bet_history, pd.DataFrame):
+                        monthly_data = self._calculate_monthly_performance(
+                            bet_history, strategy_id, idx
+                        )
+                        if monthly_data is not None:
+                            all_monthly_records.append(monthly_data)
                 
                 # Progress update
                 elapsed = time.time() - start_time
@@ -339,6 +391,7 @@ class TopStrategyGenerator:
             except Exception as e:
                 logger.error(f"      ❌ Failed {strategy_id}: {e}")
                 failed_strategies.append((strategy_id, str(e)))
+                continue  # Skip to next strategy, don't count as successful
         
         total_time = time.time() - start_time
         logger.info(f"🏁 Backtesting completed in {total_time/60:.1f} minutes")
@@ -354,7 +407,8 @@ class TopStrategyGenerator:
                 'failed_strategies': len(failed_strategies),
                 'generation_time_minutes': total_time / 60,
                 'target_strategies': self.target_strategies,
-                'failed_strategy_details': failed_strategies
+                'failed_strategy_details': failed_strategies,
+                'success_rate': len(all_results) / len(strategies) if len(strategies) > 0 else 0
             },
             'strategy_results': all_results,
             'combined_data': {
@@ -363,6 +417,16 @@ class TopStrategyGenerator:
                 'monthly_performance': pd.concat(all_monthly_records, ignore_index=True) if all_monthly_records else pd.DataFrame()
             }
         }
+        
+        # Log data collection summary
+        logger.info(f"📊 Data collection summary:")
+        logger.info(f"   Bet records: {len(combined_results['combined_data']['all_bets'])} rows")
+        logger.info(f"   Daily performance: {len(combined_results['combined_data']['daily_performance'])} rows")
+        logger.info(f"   Monthly performance: {len(combined_results['combined_data']['monthly_performance'])} rows")
+        
+        if not combined_results['combined_data']['daily_performance'].empty:
+            daily_cols = list(combined_results['combined_data']['daily_performance'].columns)
+            logger.info(f"   Daily performance columns: {daily_cols}")
         
         return combined_results
     
@@ -421,34 +485,67 @@ class TopStrategyGenerator:
                 logger.warning("⚠️ No daily data available for correlation calculation")
                 return pd.DataFrame()
             
+            # Check available columns
+            logger.info(f"📋 Available columns in daily data: {list(daily_data.columns)}")
+            
+            # Determine which column to use for correlation
+            value_column = None
+            if 'daily_roi' in daily_data.columns:
+                value_column = 'daily_roi'
+                logger.info("📊 Using 'daily_roi' for correlation calculation")
+            elif 'daily_return' in daily_data.columns:
+                value_column = 'daily_return'
+                logger.info("📊 Using 'daily_return' for correlation calculation")
+            elif 'ending_bankroll' in daily_data.columns:
+                # Calculate daily returns from bankroll changes
+                daily_data = daily_data.sort_values(['strategy_id', 'date'])
+                daily_data['daily_return_calc'] = daily_data.groupby('strategy_id')['ending_bankroll'].pct_change()
+                value_column = 'daily_return_calc'
+                logger.info("📊 Calculated daily returns from bankroll changes")
+            else:
+                logger.warning("⚠️ No suitable column found for correlation calculation")
+                return pd.DataFrame()
+            
             # Pivot to get strategy returns by date
             pivot_data = daily_data.pivot(
                 index='date', 
                 columns='strategy_id', 
-                values='cumulative_return'
+                values=value_column
             )
             
-            # Calculate daily returns (percentage change)
-            daily_returns = pivot_data.pct_change().fillna(0)
-            
             # Calculate correlation matrix
-            correlation_matrix = daily_returns.corr()
+            correlation_matrix = pivot_data.corr()
+            
+            # Remove NaN strategies (strategies with insufficient data)
+            correlation_matrix = correlation_matrix.dropna(axis=0, how='all').dropna(axis=1, how='all')
+            
+            if correlation_matrix.empty:
+                logger.warning("⚠️ Correlation matrix is empty after cleaning")
+                return pd.DataFrame()
             
             logger.info(f"✅ Calculated correlations for {len(correlation_matrix)} strategies")
             
             # Summary statistics
-            avg_correlation = correlation_matrix.values[np.triu_indices_from(correlation_matrix.values, k=1)].mean()
-            max_correlation = correlation_matrix.values[np.triu_indices_from(correlation_matrix.values, k=1)].max()
-            min_correlation = correlation_matrix.values[np.triu_indices_from(correlation_matrix.values, k=1)].min()
-            
-            logger.info(f"   📈 Average correlation: {avg_correlation:.3f}")
-            logger.info(f"   📈 Max correlation: {max_correlation:.3f}")
-            logger.info(f"   📈 Min correlation: {min_correlation:.3f}")
+            if len(correlation_matrix) > 1:
+                # Get upper triangle values (excluding diagonal)
+                mask = np.triu(np.ones_like(correlation_matrix.values, dtype=bool), k=1)
+                upper_triangle_values = correlation_matrix.values[mask]
+                
+                if len(upper_triangle_values) > 0:
+                    avg_correlation = np.mean(upper_triangle_values)
+                    max_correlation = np.max(upper_triangle_values)
+                    min_correlation = np.min(upper_triangle_values)
+                    
+                    logger.info(f"   📈 Average correlation: {avg_correlation:.3f}")
+                    logger.info(f"   📈 Max correlation: {max_correlation:.3f}")
+                    logger.info(f"   📈 Min correlation: {min_correlation:.3f}")
             
             return correlation_matrix
             
         except Exception as e:
             logger.error(f"❌ Failed to calculate correlations: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return pd.DataFrame()
     
     def save_results(self, combined_results: Dict[str, Any], 
@@ -471,27 +568,34 @@ class TopStrategyGenerator:
         try:
             # 1. Individual bet records CSV
             bet_data = combined_results['combined_data']['all_bets']
-            if not bet_data.empty:
+            if not bet_data.empty and len(bet_data) > 0:
                 bet_file = os.path.join(self.results_dir, f'backtest_top_strategies_bets_{timestamp}.csv')
                 bet_data.to_csv(bet_file, index=False, encoding='utf-8')
                 output_files['bet_records'] = bet_file
                 logger.info(f"   ✅ Bet records: {os.path.basename(bet_file)} ({len(bet_data):,} records)")
+            else:
+                logger.warning("   ⚠️ No bet records to save")
             
-            # 2. Daily performance CSV
+            # 2. Daily financial performance CSV (for correlation analysis)
             daily_data = combined_results['combined_data']['daily_performance']
-            if not daily_data.empty:
-                daily_file = os.path.join(self.results_dir, f'backtest_top_strategies_daily_{timestamp}.csv')
+            if not daily_data.empty and len(daily_data) > 0:
+                daily_file = os.path.join(self.results_dir, f'backtest_top_strategies_daily_financial_{timestamp}.csv')
                 daily_data.to_csv(daily_file, index=False, encoding='utf-8')
-                output_files['daily_performance'] = daily_file
-                logger.info(f"   ✅ Daily performance: {os.path.basename(daily_file)} ({len(daily_data):,} records)")
+                output_files['daily_financial'] = daily_file
+                logger.info(f"   ✅ Daily financial performance: {os.path.basename(daily_file)} ({len(daily_data):,} records)")
+                logger.info(f"       Columns: {list(daily_data.columns)}")
+            else:
+                logger.warning("   ⚠️ No daily financial performance data to save")
             
             # 3. Monthly performance CSV
             monthly_data = combined_results['combined_data']['monthly_performance']
-            if not monthly_data.empty:
+            if not monthly_data.empty and len(monthly_data) > 0:
                 monthly_file = os.path.join(self.results_dir, f'backtest_top_strategies_monthly_{timestamp}.csv')
                 monthly_data.to_csv(monthly_file, index=False, encoding='utf-8')
                 output_files['monthly_performance'] = monthly_file
                 logger.info(f"   ✅ Monthly performance: {os.path.basename(monthly_file)} ({len(monthly_data):,} records)")
+            else:
+                logger.warning("   ⚠️ No monthly performance data to save")
             
             # 4. Strategy correlation matrix CSV
             if not correlation_matrix.empty:
@@ -525,13 +629,25 @@ class TopStrategyGenerator:
             
             # Add correlation summary
             if not correlation_matrix.empty:
-                corr_values = correlation_matrix.values[np.triu_indices_from(correlation_matrix.values, k=1)]
+                # Get upper triangle values (excluding diagonal)
+                mask = np.triu(np.ones_like(correlation_matrix.values, dtype=bool), k=1)
+                upper_triangle_values = correlation_matrix.values[mask]
+                
+                if len(upper_triangle_values) > 0:
+                    summary_data['correlation_summary'] = {
+                        'average_correlation': float(np.mean(upper_triangle_values)),
+                        'max_correlation': float(np.max(upper_triangle_values)),
+                        'min_correlation': float(np.min(upper_triangle_values)),
+                        'std_correlation': float(np.std(upper_triangle_values)),
+                        'strategies_count': correlation_matrix.shape[0]
+                    }
+                else:
+                    summary_data['correlation_summary'] = {
+                        'note': 'Insufficient data for correlation calculation'
+                    }
+            else:
                 summary_data['correlation_summary'] = {
-                    'average_correlation': float(np.mean(corr_values)),
-                    'max_correlation': float(np.max(corr_values)),
-                    'min_correlation': float(np.min(corr_values)),
-                    'std_correlation': float(np.std(corr_values)),
-                    'strategies_count': correlation_matrix.shape[0]
+                    'note': 'No correlation data available'
                 }
             
             summary_file = os.path.join(self.results_dir, f'backtest_top_strategies_summary_{timestamp}.json')
@@ -611,9 +727,17 @@ class TopStrategyGenerator:
             output_files = self.save_results(combined_results, correlation_matrix)
             
             logger.info("🎉 Top strategy generation completed successfully!")
-            logger.info("📁 Generated files for risk_assessment.ipynb:")
-            for file_type, file_path in output_files.items():
-                logger.info(f"   📄 {file_type}: {os.path.basename(file_path)}")
+            
+            if output_files:
+                logger.info("📁 Generated files for risk_assessment.ipynb:")
+                for file_type, file_path in output_files.items():
+                    logger.info(f"   📄 {file_type}: {os.path.basename(file_path)}")
+            
+            # Log correlation status
+            if not correlation_matrix.empty:
+                logger.info(f"✅ Strategy correlations calculated successfully ({correlation_matrix.shape[0]} strategies)")
+            else:
+                logger.warning("⚠️ Strategy correlations could not be calculated - check daily financial data")
             
             return output_files
             
