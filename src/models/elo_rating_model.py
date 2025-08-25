@@ -1,119 +1,122 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-Elo Rating System for NHL Hockey Predictions
-Implements dynamic team ratings that update after each game
-Updated for franchise-based database schema with training/backtesting split 
+Hockey Prediction System - Elo Rating Model
+==========================================
+Implementuje dynamický Elo rating systém pro NHL týmy.
+Upraveno pro franchise-based databázové schéma s trénink/backtesting rozdělením.
+
+Umístění: src/models/elo_rating_model.py
 """
 
 import pandas as pd
 import numpy as np
-from sqlalchemy import create_engine, text
-from dotenv import load_dotenv
-import os
-import logging
+from sqlalchemy import create_engine
 from datetime import datetime, date
 from typing import Dict, Tuple, List, Optional
 import json
-import pickle
 
-# Load environment variables
-load_dotenv()
+# Import centrálních komponent
+from config.paths import PATHS
+from config.settings import settings
+from config.logging_config import get_logger
+from src.utils.file_handlers import save_model, load_model, write_json
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('logs/elo_model.log', encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
+# Logger pro tento modul
+logger = get_logger(__name__)
+
 
 class EloRatingSystem:
     """
-    Elo Rating System for NHL team predictions
-        Updated for franchise-based database schema
+    Elo Rating System pro NHL tým predikce
+    Aktualizováno pro franchise-based databázové schéma
     """
     
     def __init__(self, 
-                 initial_rating: float = 1500.0,
-                 k_factor: float = 32.0,
-                 home_advantage: float = 100.0,
-                 season_regression: float = 0.25):
+                 initial_rating: Optional[float] = None,
+                 k_factor: Optional[float] = None,
+                 home_advantage: Optional[float] = None,
+                 season_regression: Optional[float] = None):
         """
-        Initialize Elo Rating System
+        Inicializace Elo Rating Systému
         
         Args:
-            initial_rating: Starting Elo rating for all teams
-            k_factor: Learning rate (higher = more volatile)
-            home_advantage: Home team rating bonus
-            season_regression: How much ratings regress to mean between seasons (0-1)
+            initial_rating: Výchozí Elo rating pro všechny týmy (z settings pokud None)
+            k_factor: Learning rate - vyšší = volatilnější (z settings pokud None)
+            home_advantage: Bonus pro domácí tým (z settings pokud None)
+            season_regression: Regrese ratingů mezi sezónami 0-1 (z settings pokud None)
         """
-        self.initial_rating = initial_rating
-        self.k_factor = k_factor
-        self.home_advantage = home_advantage
-        self.season_regression = season_regression
+        # Načti parametry ze settings nebo použij zadané
+        self.initial_rating = initial_rating or settings.model.elo_initial_rating
+        self.k_factor = k_factor or settings.model.elo_k_factor
+        self.home_advantage = home_advantage or settings.model.elo_home_advantage
+        self.season_regression = season_regression or settings.model.elo_season_regression
         
-        # Team ratings storage
+        # Úložiště team ratingů
         self.team_ratings = {}  # {team_id: current_rating}
-        self.rating_history = []  # Historical ratings for analysis
+        self.rating_history = []  # Historické ratings pro analýzu
         
-        # Database connection
-        self.engine = create_engine(os.getenv('DATABASE_URL'))
+        # Databázové připojení z centrálních settings
+        self.engine = create_engine(settings.database.connection_string)
         
-        # Performance tracking
+        # Tracking výkonu
         self.predictions = []
         self.results = []
         
+        logger.info(f"Elo Rating System inicializován:")
+        logger.info(f"  Initial rating: {self.initial_rating}")
+        logger.info(f"  K-factor: {self.k_factor}")
+        logger.info(f"  Home advantage: {self.home_advantage}")
+        logger.info(f"  Season regression: {self.season_regression}")
+    
     def expected_score(self, rating_a: float, rating_b: float, home_advantage: float = 0) -> float:
         """
-        Calculate expected score for team A against team B
+        Vypočítá očekávané skóre pro tým A proti týmu B
         
         Args:
-            rating_a: Team A's Elo rating
-            rating_b: Team B's Elo rating  
-            home_advantage: Additional rating for home team
+            rating_a: Elo rating týmu A
+            rating_b: Elo rating týmu B
+            home_advantage: Dodatečný rating pro domácí tým
             
         Returns:
-            Expected probability that team A wins (0-1)
+            Očekávaná pravděpodobnost výhry týmu A (0-1)
         """
         adjusted_rating_a = rating_a + home_advantage
         rating_diff = adjusted_rating_a - rating_b
         
-        # Standard Elo formula
+        # Standardní Elo formule
         expected = 1 / (1 + 10 ** (-rating_diff / 400))
         return expected
     
     def update_ratings(self, team_a_id: int, team_b_id: int, actual_score: float, 
                       home_advantage: float = 0, k_multiplier: float = 1.0) -> Tuple[float, float]:
         """
-        Update Elo ratings after a game
+        Aktualizuje Elo ratings po zápase
         
         Args:
-            team_a_id: Home team ID 
-            team_b_id: Away team ID
-            actual_score: 1 if team A won, 0 if team B won, 0.5 for OT/SO loss
-            home_advantage: Home advantage rating bonus
-            k_multiplier: Multiplier for K-factor (for playoff games, etc.)
+            team_a_id: ID domácího týmu
+            team_b_id: ID hostujícího týmu
+            actual_score: 1 pokud tým A vyhrál, 0 pokud tým B vyhrál, 0.5 pro OT/SO porážku
+            home_advantage: Bonus pro domácí výhodu
+            k_multiplier: Násobitel pro K-factor (pro playoff zápasy, atd.)
             
         Returns:
-            Tuple of (new_rating_a, new_rating_b)
+            Tuple (new_rating_a, new_rating_b)
         """
-        # Get current ratings
+        # Získej aktuální ratings
         rating_a = self.team_ratings.get(team_a_id, self.initial_rating)
         rating_b = self.team_ratings.get(team_b_id, self.initial_rating)
         
-        # Calculate expected scores
+        # Vypočítaj očekávané skóre
         expected_a = self.expected_score(rating_a, rating_b, home_advantage)
         expected_b = 1 - expected_a
         
-        # Calculate rating changes
+        # Vypočítaj změny ratingu
         k_factor = self.k_factor * k_multiplier
         change_a = k_factor * (actual_score - expected_a)
-        change_b = k_factor * ((1 - actual_score) - expected_b) 
+        change_b = k_factor * ((1 - actual_score) - expected_b)
         
-        # Update ratings
+        # Aktualizuj ratings
         new_rating_a = rating_a + change_a
         new_rating_b = rating_b + change_b
         
@@ -125,43 +128,42 @@ class EloRatingSystem:
     def game_result_to_score(self, home_score: int, away_score: int, 
                            overtime_shootout: str = '') -> Tuple[float, str]:
         """
-        Convert game result to Elo score format
+        Převede výsledek zápasu na Elo skóre formát
         
         Args:
-            home_score: Home team final score
-            away_score: Away team final score  
-            overtime_shootout: 'OT', 'SO', or empty string
+            home_score: Finální skóre domácího týmu
+            away_score: Finální skóre hostujícího týmu
+            overtime_shootout: 'OT', 'SO', nebo prázdný string
             
         Returns:
-            Tuple of (home_team_score, result_type)
-            home_team_score: 1.0 for win, 0.0 for loss, 0.6 for OT/SO win, 0.4 for OT/SO loss
+            Tuple (home_team_score, result_type)
+            home_team_score: 1.0 výhra, 0.0 porážka, 0.6 OT/SO výhra, 0.4 OT/SO porážka
         """
         if home_score > away_score:
             if overtime_shootout in ['OT', 'SO']:
-                return 0.6, f'HOME_WIN_{overtime_shootout}'  # OT/SO win worth less
+                return 0.6, f'HOME_WIN_{overtime_shootout}'  # OT/SO výhra méně cenná
             else:
-                return 1.0, 'HOME_WIN_REG'  # Regulation win
+                return 1.0, 'HOME_WIN_REG'  # Regulérní výhra
         elif away_score > home_score:
             if overtime_shootout in ['OT', 'SO']:
-                return 0.4, f'AWAY_WIN_{overtime_shootout}'  # OT/SO loss gets some points
+                return 0.4, f'AWAY_WIN_{overtime_shootout}'  # OT/SO porážka dostane body
             else:
-                return 0.0, 'AWAY_WIN_REG'  # Regulation loss
+                return 0.0, 'AWAY_WIN_REG'  # Regulérní porážka
         else:
-            return 0.5, 'TIE'  # Shouldn't happen in modern NHL
+            return 0.5, 'TIE'  # Nemělo by se stát v moderní NHL
     
-    # === NAHRADIT EXISTUJÍCÍ METODU ===
     def load_historical_games(self, season_start: str = '2022', season_end: str = '2024') -> pd.DataFrame:
         """
-        Load historical games from database for training
+        Načte historické zápasy z databáze pro trénování
         KRITICKÉ: Načítá pouze data do sezóny 2023/24 (včetně)
         Data z 2024/25 jsou rezervována pro backtesting!
         
         Args:
-            season_start: First season to include (e.g., '2022')
-            season_end: Last season to include for training (default '2024' = season 2023/24)
+            season_start: První sezóna k zahrnutí (např. '2022')
+            season_end: Poslední sezóna pro trénování (default '2024' = sezóna 2023/24)
             
         Returns:
-            DataFrame with game results for training
+            DataFrame s výsledky zápasů pro trénování
         """
         query = f"""
         SELECT 
@@ -175,11 +177,11 @@ class EloRatingSystem:
             g.away_score,
             g.overtime_shootout,
             
-            -- Home team with franchise info
+            -- Domácí tým s franchise info
             ht.name as home_team_name,
             hf.franchise_name as home_franchise_name,
             
-            -- Away team with franchise info  
+            -- Hostující tým s franchise info  
             at.name as away_team_name,
             af.franchise_name as away_franchise_name
             
@@ -199,23 +201,19 @@ class EloRatingSystem:
         
         df = pd.read_sql(query, self.engine)
         
-        logger.info(f"Loaded {len(df)} completed games for TRAINING from {season_start} to {season_end}")
-        logger.info(f"IMPORTANT: Season 2024/25 excluded - reserved for backtesting!")
+        logger.info(f"Načteno {len(df)} dokončených zápasů pro TRÉNOVÁNÍ z {season_start} do {season_end}")
+        logger.info(f"DŮLEŽITÉ: Sezóna 2024/25 vyloučena - rezervována pro backtesting!")
         return df
     
-    # === UPRAVIT EXISTUJÍCÍ METODU ===
-    # V metodě train_on_historical_data(), PŘIDAT na začátek metody:
-    # OPRAVA: Odstraň zbytečnou team validation nebo ji zjednodušte (mapování týmů)
-    # PŘIDÁN na začátek debug:
     def train_on_historical_data(self, games_df: pd.DataFrame, 
                             evaluate_predictions: bool = True) -> Dict:
         """
-        Train Elo ratings on historical game data
+        Trénuje Elo ratings na historických datech zápasů
         KRITICKÉ: Používá pouze data do sezóny 2023/24!
         Data z 2024/25 jsou rezervována pro backtesting.
         """
-        # VALIDATION: Check that no 2024/25 data leaked into training
-        logger.info("Training Elo ratings on historical data...")
+        # VALIDATION: Kontrola, že žádná data z 2024/25 neunikla do tréninku
+        logger.info("Trénování Elo ratings na historických datech...")
         if not games_df.empty:
             max_season = games_df['season'].max()
             
@@ -223,54 +221,51 @@ class EloRatingSystem:
             try:
                 max_season_int = int(max_season)
                 if max_season_int > 2024:
-                    raise ValueError(f"CRITICAL: Training data contains season {max_season}!")
+                    raise ValueError(f"KRITICKÉ: Trénovací data obsahují sezónu {max_season}!")
             except (ValueError, TypeError):
                 if str(max_season) > '2024':
-                    raise ValueError(f"CRITICAL: Training data contains season {max_season}!")
+                    raise ValueError(f"KRITICKÉ: Trénovací data obsahují sezónu {max_season}!")
         
-        logger.info("Training Elo ratings on historical data with franchise support...")
-        logger.info(f"Training data: seasons {games_df['season'].min()} to {games_df['season'].max()}")
-        logger.info(f"CONFIRMED: Season 2024/25 excluded from training")
+        logger.info("Trénování Elo ratings na historických datech s franchise podporou...")
+        logger.info(f"Trénovací data: sezóny {games_df['season'].min()} do {games_df['season'].max()}")
+        logger.info(f"POTVRZENO: Sezóna 2024/25 vyloučena z tréninku")
         
         # Debug sample team IDs from data
         sample_teams = set(list(games_df['home_team_id'].unique())[:5])
-        logger.info(f"Sample team IDs from games data: {sample_teams}")
+        logger.debug(f"Ukázkové team ID z dat zápasů: {sample_teams}")
 
-        # Initialize all teams with base rating - SIMPLIFIED (odstraň validation)
+        # Inicializuj všechny týmy se základním ratingem - ZJEDNODUŠENO
         unique_teams = set(games_df['home_team_id'].unique()) | set(games_df['away_team_id'].unique())
         for team_id in unique_teams:
             self.team_ratings[team_id] = self.initial_rating
         
-        logger.info(f"Initialized {len(unique_teams)} teams with rating {self.initial_rating}")
-        
-        # === ZBYTEK METODY ZŮSTÁVÁ BEZE ZMĚN ===
-        # (pouze přidat validation na začátek)
+        logger.info(f"Inicializováno {len(unique_teams)} týmů s ratingem {self.initial_rating}")
         
         # Track for evaluation
         predictions = []
         actuals = []
         current_season = None
         
-        # Process games chronologically
+        # Zpracuj zápasy chronologicky
         for idx, game in games_df.iterrows():
             home_team_id = game['home_team_id']
             away_team_id = game['away_team_id']
             
-            # Apply season regression if new season
+            # Aplikuj sezónní regresi pokud nová sezóna
             if current_season != game['season']:
                 if current_season is not None:
                     self._apply_season_regression()
-                    logger.info(f"Applied season regression for season {game['season']}")
+                    logger.info(f"Aplikována sezónní regrese pro sezónu {game['season']}")
                 current_season = game['season']
             
-            # Make prediction before updating ratings
+            # Udělej predikci před aktualizací ratingů
             if evaluate_predictions:
                 home_rating = self.team_ratings.get(home_team_id, self.initial_rating)
                 away_rating = self.team_ratings.get(away_team_id, self.initial_rating)
                 predicted_prob = self.expected_score(home_rating, away_rating, self.home_advantage)
                 predictions.append(predicted_prob)
             
-            # Get actual result
+            # Získej skutečný výsledek
             home_score, result_type = self.game_result_to_score(
                 game['home_score'], 
                 game['away_score'],
@@ -280,7 +275,7 @@ class EloRatingSystem:
             if evaluate_predictions:
                 actuals.append(home_score if home_score in [0.0, 1.0] else int(home_score > 0.5))
             
-            # Update ratings
+            # Aktualizuj ratings
             old_home_rating = self.team_ratings.get(home_team_id, self.initial_rating)
             old_away_rating = self.team_ratings.get(away_team_id, self.initial_rating)
             
@@ -288,7 +283,7 @@ class EloRatingSystem:
                 home_team_id, away_team_id, home_score, self.home_advantage
             )
             
-            # Store rating history
+            # Ulož rating history
             self.rating_history.append({
                 'game_id': game['id'],
                 'date': game['date'],
@@ -303,35 +298,24 @@ class EloRatingSystem:
                 'result_type': result_type
             })
         
-        # Calculate evaluation metrics
+        # Vypočítej evaluation metrics
         metrics = {}
         if evaluate_predictions and predictions:
             metrics = self._calculate_metrics(predictions, actuals)
-            logger.info(f"Training completed. Accuracy: {metrics.get('accuracy', 0):.3f}")
+            logger.info(f"Trénování dokončeno. Přesnost: {metrics.get('accuracy', 0):.3f}")
         
-        # Get final team ratings
+        # Získej finální team ratings
         team_ratings_df = self.get_current_ratings()
         
         return {
             'metrics': metrics,
             'team_ratings': team_ratings_df,
             'games_processed': len(games_df),
-            'rating_history': self.rating_history[-10:]  # Last 10 for inspection
+            'rating_history': self.rating_history[-10:]  # Posledních 10 pro kontrolu
         }
     
-    # PŘIDAT helper metodu (Zjednoduš _team_exists() pokud ji chceš zachovat - (správné mapování týmů):
-    def _team_exists(self, team_id: int) -> bool:
-        """Check if team exists in current schema - SIMPLIFIED"""
-        try:
-            # Pokud team_id je v games tabulce, existuje
-            query = "SELECT 1 FROM games WHERE home_team_id = %s OR away_team_id = %s LIMIT 1"
-            result = pd.read_sql(query, self.engine, params=[team_id, team_id])
-            return not result.empty
-        except:
-            return True  # Fallback - assume exists if can't check
-    
     def _apply_season_regression(self):
-        """Apply regression towards mean between seasons"""
+        """Aplikuje regresi k průměru mezi sezónami"""
         mean_rating = np.mean(list(self.team_ratings.values()))
         
         for team_id in self.team_ratings:
@@ -341,14 +325,14 @@ class EloRatingSystem:
     
     def predict_game(self, home_team_id: int, away_team_id: int) -> Dict:
         """
-        Predict outcome of a single game
+        Předpovídá výsledek jednoho zápasu
         
         Args:
-            home_team_id: Home team ID
-            away_team_id: Away team ID
+            home_team_id: ID domácího týmu
+            away_team_id: ID hostujícího týmu
             
         Returns:
-            Dictionary with prediction details
+            Dictionary s detaily predikce
         """
         home_rating = self.team_ratings.get(home_team_id, self.initial_rating)
         away_rating = self.team_ratings.get(away_team_id, self.initial_rating)
@@ -356,7 +340,7 @@ class EloRatingSystem:
         home_win_prob = self.expected_score(home_rating, away_rating, self.home_advantage)
         away_win_prob = 1 - home_win_prob
         
-        # Get team names
+        # Získej jména týmů
         team_names = self._get_team_names([home_team_id, away_team_id])
         
         return {
@@ -369,21 +353,20 @@ class EloRatingSystem:
             'home_win_probability': home_win_prob,
             'away_win_probability': away_win_prob,
             'predicted_winner': 'HOME' if home_win_prob > 0.5 else 'AWAY',
-            'confidence': abs(home_win_prob - 0.5) * 2,  # 0-1 scale
+            'confidence': abs(home_win_prob - 0.5) * 2,  # 0-1 škála
             'rating_difference': home_rating - away_rating + self.home_advantage
         }
     
-    # === NAHRADIT EXISTUJÍCÍ METODU ===
     def predict_upcoming_games(self, days_ahead: int = 7) -> List[Dict]:
         """
-        Predict outcomes for upcoming games
-        Updated for franchise-based schema
+        Předpovídá výsledky nadcházejících zápasů
+        Aktualizováno pro franchise-based schéma
         
         Args:
-            days_ahead: Number of days ahead to predict
+            days_ahead: Počet dní dopředu pro predikce
             
         Returns:
-            List of prediction dictionaries
+            Seznam prediction dictionary
         """
         query = f"""
         SELECT 
@@ -393,11 +376,11 @@ class EloRatingSystem:
             g.home_team_id,
             g.away_team_id,
             
-            -- Current team names (is_current = TRUE)
+            -- Aktuální jména týmů (is_current = TRUE)
             ht.name as home_team_name,
             at.name as away_team_name,
             
-            -- Franchise info for context
+            -- Franchise info pro kontext
             hf.franchise_name as home_franchise,
             af.franchise_name as away_franchise
             
@@ -424,31 +407,29 @@ class EloRatingSystem:
             prediction['away_franchise'] = game['away_franchise']
             predictions.append(prediction)
         
-        logger.info(f"Generated predictions for {len(predictions)} upcoming games")
+        logger.info(f"Vygenerovány predikce pro {len(predictions)} nadcházejících zápasů")
         return predictions
     
-    # === NAHRADIT EXISTUJÍCÍ METODU ===
-    # UPRAVENÁ get_current_ratings() s debugging
     def get_current_ratings(self) -> pd.DataFrame:
         """
-        Get current team ratings as DataFrame - DEBUG VERSION
+        Získá aktuální team ratings jako DataFrame
         """
         if not self.team_ratings:
             return pd.DataFrame()
         
-        logger.debug("Getting current ratings...")
+        logger.debug("Získávání aktuálních ratingů...")
         
-        # OPRAVA (funguje s numpy):
+        # Získej pouze validní team IDs
         team_ids = [tid for tid in self.team_ratings.keys() 
             if isinstance(tid, (int, np.integer)) and not isinstance(tid, str)]
-        logger.debug(f"Getting names for {len(team_ids)} teams...")
+        logger.debug(f"Získávání jmen pro {len(team_ids)} týmů...")
         
         team_names = self._get_team_names(team_ids)
-        logger.debug(f"Got {len(team_names)} team names")
+        logger.debug(f"Získáno {len(team_names)} jmen týmů")
         
         ratings_data = []
         for team_id, rating in self.team_ratings.items():
-            # Skip historical ratings
+            # Přeskoč historické ratings
             if isinstance(team_id, str) and 'historical' in str(team_id):
                 continue
                 
@@ -467,28 +448,25 @@ class EloRatingSystem:
         
         return df
     
-    # === NAHRADIT EXISTUJÍCÍ METODU ===
-    # OPRAVA: _get_team_names() metody - SQL chyba s COALESCE (správné mapování týmů)
-    # UPRAVENÁ _get_team_names() s více debugging
     def _get_team_names(self, team_ids: List[int]) -> Dict[int, str]:
         """
-        Get team names for given team IDs - DEBUG VERSION
+        Získá jména týmů pro dané team ID
         """
-        logger.debug(f"_get_team_names called with {len(team_ids)} IDs")
+        logger.debug(f"_get_team_names voláno s {len(team_ids)} ID")
         
         if not team_ids:
             return {}
         
-        # OPRAVA:
+        # Validní team IDs
         valid_team_ids = [int(tid) for tid in team_ids 
                   if isinstance(tid, (int, np.integer))]
         if not valid_team_ids:
-            logger.warning("No valid integer team IDs found")
+            logger.warning("Nenalezena žádná validní integer team ID")
             return {}
         
-        logger.debug(f"Valid team IDs: {valid_team_ids[:5]}...")
+        logger.debug(f"Validní team ID: {valid_team_ids[:5]}...")
         
-        # Simple query first - just get current teams
+        # Jednoduchý dotaz - získej aktuální týmy
         if len(valid_team_ids) == 1:
             query = f"""
             SELECT t.id, t.name, f.franchise_name
@@ -506,43 +484,43 @@ class EloRatingSystem:
             """
         
         try:
-            logger.debug(f"Executing SQL query...")
+            logger.debug(f"Provádění SQL dotazu...")
             df = pd.read_sql(query, self.engine)
-            logger.debug(f"Query returned {len(df)} rows")
+            logger.debug(f"Dotaz vrátil {len(df)} řádků")
             
             if df.empty:
-                logger.warning("Query returned no results - teams might not be current")
-                # Try without is_current filter
+                logger.warning("Dotaz nevrátil žádné výsledky - týmy možná nejsou aktuální")
+                # Zkus bez is_current filtru
                 query_fallback = query.replace(" AND t.is_current = TRUE", "")
                 df = pd.read_sql(query_fallback, self.engine)
-                logger.debug(f"Fallback query returned {len(df)} rows")
+                logger.debug(f"Fallback dotaz vrátil {len(df)} řádků")
             
             result = dict(zip(df['id'], df['name']))
-            logger.debug(f"Successfully mapped {len(result)} team names")
+            logger.debug(f"Úspěšně zmapováno {len(result)} jmen týmů")
             return result
             
         except Exception as e:
-            logger.error(f"SQL error in _get_team_names: {e}")
-            logger.error(f"Query was: {query}")
-            # Return fallback
+            logger.error(f"SQL chyba v _get_team_names: {e}")
+            logger.error(f"Dotaz byl: {query}")
+            # Vrať fallback
             return {int(tid): f'Team_{tid}' for tid in valid_team_ids}
     
     def _calculate_metrics(self, predictions: List[float], actuals: List[int]) -> Dict:
-        """Calculate prediction metrics"""
+        """Vypočítá metriky predikce"""
         predictions = np.array(predictions)
         actuals = np.array(actuals)
         
-        # Convert probabilities to binary predictions
+        # Převeď pravděpodobnosti na binární predikce
         binary_predictions = (predictions > 0.5).astype(int)
         
-        # Accuracy
+        # Přesnost
         accuracy = np.mean(binary_predictions == actuals)
         
-        # Brier Score (lower is better)
+        # Brier Score (nižší je lepší)
         brier_score = np.mean((predictions - actuals) ** 2)
         
         # Log Loss 
-        epsilon = 1e-15  # Prevent log(0)
+        epsilon = 1e-15  # Zabraň log(0)
         predictions_clipped = np.clip(predictions, epsilon, 1 - epsilon)
         log_loss = -np.mean(actuals * np.log(predictions_clipped) + 
                            (1 - actuals) * np.log(1 - predictions_clipped))
@@ -554,109 +532,16 @@ class EloRatingSystem:
             'total_predictions': len(predictions)
         }
 
-    # === PŘIDAT NOVÉ METODY ===
-    def get_team_id_for_date(self, team_name: str, game_date: str) -> Optional[int]:
-        """
-        Získá správné team_id pro daný název a datum
-        Řeší historické změny (Arizona → Utah, Winnipeg Jets disambiguation)
-        
-        Args:
-            team_name: Název týmu (může být historický)
-            game_date: Datum zápasu (YYYY-MM-DD)
-            
-        Returns:
-            team_id nebo None pokud tým nebyl nalezen
-        """
-        # Normalize team name first
-        normalized_name = self._normalize_team_name(team_name, game_date)
-        
-        query = """
-        SELECT t.id, t.name, f.franchise_name 
-        FROM teams t
-        JOIN franchises f ON t.franchise_id = f.id
-        WHERE (t.name = %s OR f.franchise_name LIKE %s)
-        AND (%s >= t.effective_from)
-        AND (%s <= t.effective_to OR t.effective_to IS NULL)
-        ORDER BY t.effective_from DESC
-        LIMIT 1
-        """
-        
-        try:
-            result = pd.read_sql(query, self.engine, params=[
-                normalized_name, f'%{normalized_name}%', game_date, game_date
-            ])
-            
-            if not result.empty:
-                return int(result['id'].iloc[0])
-            else:
-                logger.warning(f"Team not found: {team_name} for date {game_date}")
-                return None
-                
-        except Exception as e:
-            logger.error(f"Error resolving team {team_name} for date {game_date}: {e}")
-            return None
-
-    def _normalize_team_name(self, team_name: str, game_date: str) -> str:
-        """
-        Normalizuje názvy týmů podle data
-        Handles Arizona → Utah transition and Winnipeg Jets disambiguation
-        """
-        game_date = str(game_date)  # Ensure string format
-        
-        # Arizona/Utah mapping podle data
-        if 'Arizona Coyotes' in team_name:
-            if game_date >= '2024-04-18':
-                return 'Utah Mammoth'
-            return 'Arizona Coyotes'
-        
-        if any(x in team_name for x in ['Utah Hockey Club', 'Utah Mammoth', 'Utah HC']):
-            return 'Utah Mammoth'
-            
-        # Winnipeg Jets disambiguation
-        if 'Winnipeg Jets' in team_name:
-            if game_date <= '2011-05-31':
-                return 'Utah Mammoth'  # Historical Jets → Utah lineage
-            return 'Winnipeg Jets'      # Current Jets (from Atlanta)
-        
-        # Phoenix Coyotes historical mapping
-        if 'Phoenix Coyotes' in team_name:
-            return 'Utah Mammoth'
-        
-        return team_name
-
-    def get_franchise_id_for_team(self, team_id: int) -> Optional[int]:
-        """Získá franchise_id pro daný team_id"""
-        query = "SELECT franchise_id FROM teams WHERE id = %s"
-        try:
-            result = pd.read_sql(query, self.engine, params=[team_id])
-            return int(result['franchise_id'].iloc[0]) if not result.empty else None
-        except Exception as e:
-            logger.error(f"Error getting franchise for team {team_id}: {e}")
-            return None
-
-    def handle_franchise_transition(self, old_team_id: int, new_team_id: int, transition_date: str):
-        """
-        Přenese rating ze starého týmu na nový při změně franchise
-        """
-        if old_team_id in self.team_ratings:
-            old_rating = self.team_ratings[old_team_id]
-            self.team_ratings[new_team_id] = old_rating
-            
-            logger.info(f"Transferred rating {old_rating:.1f} from team {old_team_id} to {new_team_id} on {transition_date}")
-            
-            # Keep old rating for historical analysis but mark it
-            self.team_ratings[f"{old_team_id}_historical"] = old_rating
-
     def load_backtesting_games(self, season: str = '2025') -> pd.DataFrame:
         """
-        Load games for backtesting (season 2024/25)
-        KRITICKÉ: Tyto data NESMÍ být použita pro trénování!
+        Načte zápasy pro backtesting (sezóna 2024/25)
+        KRITICKÉ: Tato data NESMÍ být použita pro tréninng!
         
         Args:
-            season: Season for backtesting (default '2025' = season 2024/25)
+            season: Sezóna pro backtesting (default '2025' = sezóna 2024/25)
             
         Returns:
-            DataFrame with games for backtesting (includes scheduled games)
+            DataFrame se zápasy pro backtesting (včetně naplánovaných zápasů)
         """
         query = f"""
         SELECT 
@@ -671,11 +556,11 @@ class EloRatingSystem:
             g.overtime_shootout,
             g.status,
             
-            -- Current team names (from franchise perspective)
+            -- Aktuální jména týmů (z franchise perspektivy)
             ht.name as home_team_name,
             hf.franchise_name as home_franchise_name,
             
-            -- Away team with franchise info  
+            -- Hostující tým s franchise info  
             at.name as away_team_name,
             af.franchise_name as away_franchise_name
             
@@ -686,7 +571,7 @@ class EloRatingSystem:
         JOIN franchises af ON at.franchise_id = af.id
         
         WHERE g.season = '{season}'
-            -- Include both completed AND scheduled games for backtesting
+            -- Zahrnout dokončené I naplánované zápasy pro backtesting
         ORDER BY g.date, g.datetime_et, g.id
         """
         
@@ -695,10 +580,10 @@ class EloRatingSystem:
         completed_games = len(df[df['status'] == 'completed'])
         scheduled_games = len(df[df['status'] == 'scheduled'])
         
-        logger.info(f"Loaded {len(df)} games for BACKTESTING from season {season}")
-        logger.info(f"  - Completed: {completed_games} games")
-        logger.info(f"  - Scheduled: {scheduled_games} games")
-        logger.warning(f"REMINDER: These games were NOT used for model training!")
+        logger.info(f"Načteno {len(df)} zápasů pro BACKTESTING ze sezóny {season}")
+        logger.info(f"  - Dokončené: {completed_games} zápasů")
+        logger.info(f"  - Naplánované: {scheduled_games} zápasů")
+        logger.warning(f"PŘIPOMÍNKA: Tyto zápasy nebyly použity pro trénování modelu!")
         
         return df
 
@@ -735,33 +620,13 @@ class EloRatingSystem:
         
         return summary
     
-    # 4. DEBUG: Přidej dotaz na zjištění skutečných team IDs v databázi
-    def debug_team_ids(self):
-        """Debug method to see actual team IDs in database"""
-        try:
-            query = """
-            SELECT t.id, t.name, t.is_current, f.franchise_name
-            FROM teams t
-            JOIN franchises f ON t.franchise_id = f.id
-            ORDER BY t.id
-            """
-            df = pd.read_sql(query, self.engine)
-            logger.info("ACTUAL TEAM IDs IN DATABASE:")
-            for _, row in df.iterrows():
-                current_flag = "✓" if row['is_current'] else "✗"
-                logger.info(f"  ID {row['id']:2d}: {row['name']} ({row['franchise_name']}) {current_flag}")
-            
-            return df
-            
-        except Exception as e:
-            logger.error(f"Error checking team IDs: {e}")
-            return pd.DataFrame()
-    # === PŘIDAT NOVÉ METODY ===
-    
-    # === UPRAVIT save_model() metodu ===
-    def save_model(self, filepath: str = 'models/elo_model.pkl'):
-        """Save the trained model with schema version"""
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    def save_model(self, filepath: Optional[str] = None):
+        """Uloží natrénovaný model s verzí schématu"""
+        if filepath is None:
+            filepath = PATHS.trained_models / 'elo_model.pkl'
+        
+        # Vytvoř adresář pokud neexistuje
+        PATHS.trained_models.mkdir(parents=True, exist_ok=True)
         
         model_data = {
             'team_ratings': self.team_ratings,
@@ -773,42 +638,40 @@ class EloRatingSystem:
             },
             'rating_history': self.rating_history,
             'trained_date': datetime.now().isoformat(),
-            'schema_version': '2.0',  # NOVÉ: označuje franchise-based schema
+            'schema_version': '2.0',  # NOVÉ: označuje franchise-based schéma
             'franchise_support': True  # NOVÉ: podporuje franchise tracking
         }
         
-        with open(filepath, 'wb') as f:
-            pickle.dump(model_data, f)
+        save_model(model_data, filepath)
+        logger.info(f"Model uložen do {filepath} (schéma v2.0)")
         
-        logger.info(f"Model saved to {filepath} (schema v2.0)")
+    def load_model(self, filepath: Optional[str] = None):
+        """Načte natrénovaný model s kontrolou kompatibility schématu"""
+        if filepath is None:
+            filepath = PATHS.trained_models / 'elo_model.pkl'
         
-    # === UPRAVIT load_model() metodu ===
-    def load_model(self, filepath: str = 'models/elo_model.pkl'):
-        """Load a trained model with schema compatibility check"""
-        with open(filepath, 'rb') as f:
-            model_data = pickle.load(f)
+        model_data = load_model(filepath)
         
-        # Check schema version
+        # Kontrola verze schématu
         schema_version = model_data.get('schema_version', '1.0')
         if schema_version == '1.0':
-            logger.warning("Loading old schema model - consider migrating")
+            logger.warning("Načítání starého schématu modelu - zvažte migraci")
             # Zde by byla migrace pokud potřeba
         
         self.team_ratings = model_data['team_ratings']
         self.rating_history = model_data['rating_history']
         
-        # Load parameters
+        # Načti parametry
         params = model_data['parameters']
         self.initial_rating = params['initial_rating']
         self.k_factor = params['k_factor'] 
         self.home_advantage = params['home_advantage']
         self.season_regression = params['season_regression']
         
-        logger.info(f"Model loaded from {filepath} (schema v{schema_version})")
+        logger.info(f"Model načten z {filepath} (schéma v{schema_version})")
 
-    # debug metoda EloRatingSystem (mapování týmů)
     def debug_team_mapping(self):
-        """Debug method to see what's happening with team names"""
+        """Debug metoda pro sledování mapování týmů"""
         logger.info("🔍 DEBUGGING TEAM MAPPING:")
         
         # 1. Zkontroluj jaké team IDs máme v self.team_ratings
@@ -824,126 +687,128 @@ class EloRatingSystem:
             ORDER BY t.id
             """
             df = pd.read_sql(query, self.engine)
-            logger.info("SAMPLE TEAMS FROM DATABASE:")
+            logger.info("UKÁZKOVÉ TÝMY Z DATABÁZE:")
             for _, row in df.iterrows():
                 current_flag = "✓" if row['is_current'] else "✗"
                 logger.info(f"  ID {row['id']:2d}: {row['name']} ({row['franchise_name']}) {current_flag}")
         except Exception as e:
-            logger.error(f"Error querying teams: {e}")
+            logger.error(f"Chyba dotazování týmů: {e}")
         
         # 3. Test _get_team_names() metodu přímo
         test_ids = [1, 9, 24]  # Top teams from log
-        logger.info(f"Testing _get_team_names() with IDs: {test_ids}")
+        logger.info(f"Testování _get_team_names() s ID: {test_ids}")
         try:
             result = self._get_team_names(test_ids)
-            logger.info(f"Result: {result}")
+            logger.info(f"Výsledek: {result}")
         except Exception as e:
-            logger.error(f"_get_team_names() failed: {e}")
+            logger.error(f"_get_team_names() selhala: {e}")
 
-# === NAHRADIT EXISTUJÍCÍ main() FUNKCI ===
+
 def main():
     """
-    Main function to train Elo model
+    Hlavní funkce pro trénování Elo modelu
     KRITICKÉ: Trénuje pouze na datech do 2023/24, 2024/25 je pro backtesting
     """
     
-    # Create necessary directories
-    os.makedirs('models', exist_ok=True)
-    os.makedirs('logs', exist_ok=True)
+    # Vytvoř potřebné adresáře
+    PATHS.ensure_directories()
     
-    logger.info("🏒 Starting Elo Rating System training...")
+    logger.info("🏒 Spuštění trénování Elo Rating System...")
     
     try:
-        # Initialize Elo system
-        elo = EloRatingSystem(
-            initial_rating=1500.0,
-            k_factor=32.0,
-            home_advantage=100.0,
-            season_regression=0.25
-        )
+        # Inicializuj Elo systém s parametry ze settings
+        elo = EloRatingSystem()  # Parametry se načtou automaticky ze settings
         
-        # Get data split summary first
+        # Získej souhrn rozdělení dat nejprve
         data_summary = elo.get_data_split_summary()
-        logger.info("\n📊 DATA SPLIT SUMMARY:")
-        logger.info(f"  Training seasons: {data_summary['training_seasons']}")
-        logger.info(f"  Training games: {data_summary['training_games']}")
-        logger.info(f"  Backtesting season: {data_summary['backtesting_season']}")
-        logger.info(f"  Backtesting games: {data_summary['backtesting_games']}")
+        logger.info("\n📊 SOUHRN ROZDĚLENÍ DAT:")
+        logger.info(f"  Trénovací sezóny: {data_summary['training_seasons']}")
+        logger.info(f"  Trénovací zápasy: {data_summary['training_games']}")
+        logger.info(f"  Backtesting sezóna: {data_summary['backtesting_season']}")
+        logger.info(f"  Backtesting zápasy: {data_summary['backtesting_games']}")
         
-        # Load TRAINING data (seasons 2022-2024, excluding 2024/25)
-        logger.info("\n📚 Loading TRAINING data (up to 2023/24)...")
+        # Načti TRÉNOVACÍ data (sezóny 2022-2024, vyjímaje 2024/25)
+        logger.info("\n📚 Načítání TRÉNOVACÍCH dat (do 2023/24)...")
         games_df = elo.load_historical_games(season_start='2022', season_end='2024')
         
         if games_df.empty:
-            logger.error("No training games found. Please ensure data is imported.")
+            logger.error("Nenalezeny žádné trénovací zápasy. Ujistěte se, že data jsou importována.")
             return
         
-        # Validate data split
+        # Validuj rozdělení dat
         max_season = games_df['season'].max()
         try:
             max_season_int = int(max_season)
             if max_season_int > 2024:
-                logger.error(f"CRITICAL ERROR: Training data contains season {max_season}!")
-                logger.error("Season 2024/25 must be reserved for backtesting!")
+                logger.error(f"KRITICKÁ CHYBA: Trénovací data obsahují sezónu {max_season}!")
+                logger.error("Sezóna 2024/25 musí být rezervována pro backtesting!")
                 return
         except (ValueError, TypeError):
             # Handle string season format
             if str(max_season) > '2024':
-                logger.error(f"CRITICAL ERROR: Training data contains season {max_season}!")
-                logger.error("Season 2024/25 must be reserved for backtesting!")
-            return
+                logger.error(f"KRITICKÁ CHYBA: Trénovací data obsahují sezónu {max_season}!")
+                logger.error("Sezóna 2024/25 musí být rezervována pro backtesting!")
+                return
         
-        logger.info(f"✅ Training data validated: {len(games_df)} games from seasons {games_df['season'].min()}-{max_season}")
+        logger.info(f"✅ Trénovací data validována: {len(games_df)} zápasů ze sezón {games_df['season'].min()}-{max_season}")
         
-        # Train the model
-        logger.info("\n🎯 Training Elo ratings...")
+        # Trénuj model
+        logger.info("\n🎯 Trénování Elo ratingů...")
         results = elo.train_on_historical_data(games_df, evaluate_predictions=True)
         
-        # Display results
-        logger.info("\n🎯 TRAINING RESULTS:")
+        # Zobraz výsledky
+        logger.info("\n🎯 VÝSLEDKY TRÉNINKU:")
         metrics = results['metrics']
-        logger.info(f"  Accuracy: {metrics.get('accuracy', 0):.3f}")
+        logger.info(f"  Přesnost: {metrics.get('accuracy', 0):.3f}")
         logger.info(f"  Brier Score: {metrics.get('brier_score', 0):.3f}")
         logger.info(f"  Log Loss: {metrics.get('log_loss', 0):.3f}")
-        logger.info(f"  Games Processed: {results['games_processed']}")
+        logger.info(f"  Zpracované zápasy: {results['games_processed']}")
         
-        # Debug team mapping
-        logger.info("\n🔍 DEBUGGING TEAM NAMES:")
+        # Debug mapování týmů
+        logger.info("\n🔍 DEBUGGING JMEN TÝMŮ:")
         elo.debug_team_mapping()
 
-        # Show current team rankings
-        logger.info("\n🏆 TOP 10 TEAM RATINGS:")
+        # Ukaž aktuální žebříček týmů
+        logger.info("\n🏆 TOP 10 TEAM RATINGŮ:")
         ratings_df = results['team_ratings']
         for _, team in ratings_df.head(10).iterrows():
             logger.info(f"  {team['rating_rank']:2d}. {team['team_name']:<25} {team['elo_rating']:7.1f}")
         
-        # Arizona → Utah transition check
+        # Arizona → Utah přechod kontrola
         utah_teams = ratings_df[ratings_df['team_name'].str.contains('Utah', na=False)]
         if not utah_teams.empty:
-            logger.info(f"\n🦣 UTAH TRANSITION VERIFIED:")
+            logger.info(f"\n🦣 UTAH PŘECHOD OVĚŘEN:")
             for _, team in utah_teams.iterrows():
-                logger.info(f"  {team['team_name']}: {team['elo_rating']:.1f} (rank {team['rating_rank']})")
+                logger.info(f"  {team['team_name']}: {team['elo_rating']:.1f} (pořadí {team['rating_rank']})")
         
-        # Save the model
-        elo.save_model('models/elo_model_trained_2024.pkl')
+        # Ulož model
+        model_filepath = PATHS.trained_models / 'elo_model_trained_2024.pkl'
+        elo.save_model(model_filepath)
         
-        # Show backtesting data availability
-        logger.info("\n📊 BACKTESTING DATA AVAILABLE:")
+        # Ulož také team ratings do JSON pro další použití
+        ratings_json_path = PATHS.trained_models / 'team_ratings_current.json'
+        ratings_dict = ratings_df.set_index('team_id')['elo_rating'].to_dict()
+        write_json(ratings_dict, ratings_json_path)
+        logger.info(f"Team ratings uloženy do {ratings_json_path}")
+        
+        # Ukaž dostupnost backtesting dat
+        logger.info("\n📊 DOSTUPNÁ BACKTESTING DATA:")
         backtesting_df = elo.load_backtesting_games('2025')
         completed_backtest = len(backtesting_df[backtesting_df['status'] == 'completed'])
-        logger.info(f"  Total games: {len(backtesting_df)}")
-        logger.info(f"  Completed (ready for backtest): {completed_backtest}")
-        logger.info(f"  Scheduled (future predictions): {len(backtesting_df) - completed_backtest}")
+        logger.info(f"  Celkem zápasů: {len(backtesting_df)}")
+        logger.info(f"  Dokončené (připravené pro backtest): {completed_backtest}")
+        logger.info(f"  Naplánované (budoucí predikce): {len(backtesting_df) - completed_backtest}")
         
-        logger.info("\n🎉 Model training completed successfully!")
-        logger.info("📋 NEXT STEPS:")
-        logger.info("  1. Run backtesting on 2024/25 season data")
-        logger.info("  2. Validate model performance on out-of-sample data")
-        logger.info("  3. If successful, proceed to live trading implementation")
+        logger.info("\n🎉 Trénování modelu úspěšně dokončeno!")
+        logger.info("📋 DALŠÍ KROKY:")
+        logger.info("  1. Spusť backtesting na datech sezóny 2024/25")
+        logger.info("  2. Validuj výkon modelu na out-of-sample datech")
+        logger.info("  3. Pokud úspěšné, pokračuj k implementaci live tradingu")
         
     except Exception as e:
-        logger.error(f"❌ Elo model training failed: {e}")
+        logger.error(f"❌ Trénování Elo modelu selhalo: {e}")
         raise
+
 
 if __name__ == "__main__":
     main()
