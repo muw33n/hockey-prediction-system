@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Hockey Prediction System - Bezpečné čtení a zápis souborů
-=========================================================
+Hockey Prediction System - Bezpečné čtení a zápis souborů (MIGRATED)
+===================================================================
 Řeší problémy s kódováním a zajišťuje konzistentní práci se soubory.
+Používá centralized paths + component-specific logging.
 
 Umístění: src/utils/file_handlers.py
 """
@@ -11,13 +12,17 @@ Umístění: src/utils/file_handlers.py
 import pandas as pd
 import json
 import pickle
-import logging
 from pathlib import Path
 from typing import Any, List, Optional, Union
 import chardet
 import csv
 
-logger = logging.getLogger(__name__)
+# === MIGRACE: Centralized imports ===
+from config.paths import PATHS
+from config.logging_config import get_component_logger
+
+# === MIGRACE: Component-specific logger pro utils ===
+logger = get_component_logger(__name__, 'utils')
 
 
 class FileHandler:
@@ -85,7 +90,7 @@ class FileHandler:
             try:
                 encoding = cls.detect_encoding(filepath)
                 df = pd.read_csv(filepath, encoding=encoding, **kwargs)
-                logger.info(f"✅ Successfully loaded {filepath.name} with detected encoding: {encoding}")
+                logger.info(f"Successfully loaded {filepath.name} with detected encoding: {encoding}")
                 return df
             except Exception as e:
                 logger.warning(f"Failed with detected encoding {encoding}: {e}")
@@ -95,7 +100,7 @@ class FileHandler:
         for enc in cls.ENCODINGS:
             try:
                 df = pd.read_csv(filepath, encoding=enc, **kwargs)
-                logger.info(f"✅ Successfully loaded {filepath.name} with encoding: {enc}")
+                logger.info(f"Successfully loaded {filepath.name} with encoding: {enc}")
                 return df
             except UnicodeDecodeError as e:
                 errors.append(f"{enc}: {str(e)[:50]}")
@@ -133,9 +138,9 @@ class FileHandler:
         
         try:
             df.to_csv(filepath, encoding=encoding, **kwargs)
-            logger.info(f"✅ Successfully saved {len(df)} rows to {filepath.name}")
+            logger.info(f"Successfully saved {len(df)} rows to {filepath.name}")
         except Exception as e:
-            logger.error(f"❌ Failed to save CSV to {filepath}: {e}")
+            logger.error(f"Failed to save CSV to {filepath}: {e}")
             raise
     
     @classmethod
@@ -164,13 +169,13 @@ class FileHandler:
         try:
             with open(filepath, 'r', encoding=encoding) as f:
                 data = json.load(f)
-            logger.info(f"✅ Successfully loaded JSON from {filepath.name}")
+            logger.info(f"Successfully loaded JSON from {filepath.name}")
             return data
         except json.JSONDecodeError as e:
-            logger.error(f"❌ Invalid JSON in {filepath}: {e}")
+            logger.error(f"Invalid JSON in {filepath}: {e}")
             raise
         except Exception as e:
-            logger.error(f"❌ Failed to read JSON from {filepath}: {e}")
+            logger.error(f"Failed to read JSON from {filepath}: {e}")
             raise
     
     @classmethod
@@ -196,9 +201,9 @@ class FileHandler:
         try:
             with open(filepath, 'w', encoding=encoding) as f:
                 json.dump(data, f, indent=indent, ensure_ascii=ensure_ascii)
-            logger.info(f"✅ Successfully saved JSON to {filepath.name}")
+            logger.info(f"Successfully saved JSON to {filepath.name}")
         except Exception as e:
-            logger.error(f"❌ Failed to save JSON to {filepath}: {e}")
+            logger.error(f"Failed to save JSON to {filepath}: {e}")
             raise
     
     @classmethod
@@ -220,10 +225,10 @@ class FileHandler:
         try:
             with open(filepath, 'rb') as f:
                 obj = pickle.load(f)
-            logger.info(f"✅ Successfully loaded pickle from {filepath.name}")
+            logger.info(f"Successfully loaded pickle from {filepath.name}")
             return obj
         except Exception as e:
-            logger.error(f"❌ Failed to load pickle from {filepath}: {e}")
+            logger.error(f"Failed to load pickle from {filepath}: {e}")
             raise
     
     @classmethod
@@ -241,9 +246,9 @@ class FileHandler:
         try:
             with open(filepath, 'wb') as f:
                 pickle.dump(obj, f)
-            logger.info(f"✅ Successfully saved pickle to {filepath.name}")
+            logger.info(f"Successfully saved pickle to {filepath.name}")
         except Exception as e:
-            logger.error(f"❌ Failed to save pickle to {filepath}: {e}")
+            logger.error(f"Failed to save pickle to {filepath}: {e}")
             raise
     
     @classmethod
@@ -271,10 +276,10 @@ class FileHandler:
         try:
             with open(filepath, 'r', encoding=encoding) as f:
                 content = f.read()
-            logger.info(f"✅ Successfully read text from {filepath.name}")
+            logger.info(f"Successfully read text from {filepath.name}")
             return content
         except Exception as e:
-            logger.error(f"❌ Failed to read text from {filepath}: {e}")
+            logger.error(f"Failed to read text from {filepath}: {e}")
             raise
     
     @classmethod
@@ -296,9 +301,9 @@ class FileHandler:
         try:
             with open(filepath, 'w', encoding=encoding) as f:
                 f.write(content)
-            logger.info(f"✅ Successfully wrote text to {filepath.name}")
+            logger.info(f"Successfully wrote text to {filepath.name}")
         except Exception as e:
-            logger.error(f"❌ Failed to write text to {filepath}: {e}")
+            logger.error(f"Failed to write text to {filepath}: {e}")
             raise
 
 
@@ -334,49 +339,206 @@ def save_model(model: Any, filepath: Union[str, Path]) -> None:
     FileHandler.save_pickle_safe(model, filepath)
 
 
-# === Test funkce ===
+# === MIGRACE: Enhanced data loading helpers s PATHS ===
+
+def load_latest_games_data(**kwargs) -> pd.DataFrame:
+    """
+    Načte nejnovější games data s použitím PATHS.
+    
+    Returns:
+        pd.DataFrame: Games data
+    """
+    try:
+        filepath = PATHS.get_data_file('games', latest=True)
+        logger.info(f"Loading latest games data from: {filepath.name}")
+        return read_csv(filepath, **kwargs)
+    except Exception as e:
+        logger.error(f"Failed to load games data: {e}")
+        raise
+
+
+def load_latest_odds_data(**kwargs) -> pd.DataFrame:
+    """
+    Načte nejnovější odds data s použitím PATHS.
+    
+    Returns:
+        pd.DataFrame: Odds data
+    """
+    try:
+        filepath = PATHS.get_data_file('odds', latest=True) 
+        logger.info(f"Loading latest odds data from: {filepath.name}")
+        return read_csv(filepath, **kwargs)
+    except Exception as e:
+        logger.error(f"Failed to load odds data: {e}")
+        raise
+
+
+def save_processed_data(df: pd.DataFrame, filename: str, **kwargs) -> Path:
+    """
+    Uloží zpracovaná data do processed_data adresáře.
+    
+    Args:
+        df: DataFrame k uložení
+        filename: Název souboru (bez přípony)
+        **kwargs: Další parametry pro write_csv
+        
+    Returns:
+        Path: Cesta k uloženému souboru
+    """
+    from datetime import datetime
+    
+    # Přidej timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename_with_timestamp = f"{filename}_{timestamp}.csv"
+    
+    # Ulož do processed_data
+    filepath = PATHS.processed_data / filename_with_timestamp
+    
+    write_csv(df, filepath, **kwargs)
+    logger.info(f"Saved processed data to: {filepath}")
+    
+    return filepath
+
+
+def load_model_safe(model_name: str, model_type: str = "pkl") -> Any:
+    """
+    Načte model s použitím PATHS a bezpečného loading.
+    
+    Args:
+        model_name: Název modelu
+        model_type: Typ souboru
+        
+    Returns:
+        Any: Načtený model
+    """
+    try:
+        filepath = PATHS.get_model_file(model_name, model_type)
+        logger.info(f"Loading model from: {filepath.name}")
+        
+        if model_type == "pkl":
+            return load_model(filepath)
+        elif model_type == "json":
+            return read_json(filepath)
+        else:
+            raise ValueError(f"Unsupported model type: {model_type}")
+            
+    except Exception as e:
+        logger.error(f"Failed to load model {model_name}: {e}")
+        raise
+
+
+def save_model_safe(model: Any, model_name: str, model_type: str = "pkl") -> Path:
+    """
+    Uloží model s použitím PATHS a bezpečného saving.
+    
+    Args:
+        model: Model k uložení
+        model_name: Název modelu
+        model_type: Typ souboru
+        
+    Returns:
+        Path: Cesta k uloženému modelu
+    """
+    try:
+        filepath = PATHS.get_model_file(model_name, model_type)
+        logger.info(f"Saving model to: {filepath.name}")
+        
+        if model_type == "pkl":
+            save_model(model, filepath)
+        elif model_type == "json":
+            write_json(model, filepath)
+        else:
+            raise ValueError(f"Unsupported model type: {model_type}")
+        
+        return filepath
+        
+    except Exception as e:
+        logger.error(f"Failed to save model {model_name}: {e}")
+        raise
+
+
+# === Test funkce (MIGRATED) ===
 
 if __name__ == "__main__":
-    # Setup logging pro test
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format='%(levelname)s | %(message)s'
+    # === MIGRACE: Setup logging pomocí centralized systému ===
+    from config.logging_config import setup_logging
+    
+    setup_logging(
+        log_level='DEBUG',
+        log_to_file=True,
+        component_files=True
     )
     
-    # Test detekce kódování
-    test_file = Path("../../data/raw/nhl_games_20250101_120000.csv")
-    if test_file.exists():
-        print(f"\n🔍 Testing encoding detection for: {test_file.name}")
-        encoding = FileHandler.detect_encoding(test_file)
-        print(f"   Detected encoding: {encoding}")
-        
-        # Test načtení CSV
-        print(f"\n📖 Testing CSV reading...")
-        try:
-            df = read_csv(test_file)
-            print(f"   ✅ Loaded {len(df)} rows, {len(df.columns)} columns")
-            print(f"   Columns: {', '.join(df.columns[:5])}...")
-        except Exception as e:
-            print(f"   ❌ Failed: {e}")
-    else:
-        print(f"⚠️ Test file not found: {test_file}")
+    logger.info("Testing migrated file handlers...")
     
-    # Test JSON
-    print("\n📝 Testing JSON operations...")
+    # === MIGRACE: Test s PATHS integrací ===
+    
+    # Test detekce kódování na real data files
+    try:
+        games_file = PATHS.get_data_file('games', latest=True)
+        logger.info(f"Testing encoding detection for: {games_file.name}")
+        
+        encoding = FileHandler.detect_encoding(games_file)
+        logger.info(f"Detected encoding: {encoding}")
+        
+        # Test načtení CSV pomocí PATHS
+        df = load_latest_games_data()
+        logger.info(f"Loaded {len(df)} games, {len(df.columns)} columns")
+        logger.info(f"Columns: {', '.join(df.columns[:5])}...")
+        
+    except FileNotFoundError:
+        logger.warning("No games data file found, skipping test")
+    except Exception as e:
+        logger.error(f"Games data test failed: {e}")
+    
+    # Test JSON operations
+    logger.info("Testing JSON operations...")
     test_data = {
         "team": "Utah Mammoth",
         "rating": 1523.5,
         "české_znaky": "Řeřicha žluťoučký"
     }
     
-    test_json_path = Path("test_output.json")
+    # === MIGRACE: Použij PATHS pro test file ===
+    test_json_path = PATHS.processed_data / "test_output.json"
+    
     try:
         write_json(test_data, test_json_path)
         loaded_data = read_json(test_json_path)
         assert loaded_data == test_data
-        print("   ✅ JSON write/read successful")
-        test_json_path.unlink()  # Clean up
+        logger.info("JSON write/read successful")
+        
+        # Cleanup
+        test_json_path.unlink(missing_ok=True)
+        
     except Exception as e:
-        print(f"   ❌ JSON test failed: {e}")
+        logger.error(f"JSON test failed: {e}")
     
-    print("\n✅ File handler tests completed!")
+    # Test processed data saving
+    try:
+        import pandas as pd
+        test_df = pd.DataFrame({
+            'team': ['Team A', 'Team B'],
+            'rating': [1500, 1600]
+        })
+        
+        saved_path = save_processed_data(test_df, "test_data", index=False)
+        logger.info(f"Test processed data saved to: {saved_path}")
+        
+        # Cleanup
+        saved_path.unlink(missing_ok=True)
+        
+    except Exception as e:
+        logger.error(f"Processed data test failed: {e}")
+    
+    logger.info("Migrated file handler tests completed!")
+    
+    # Log summary
+    logger.info("=" * 50)
+    logger.info("MIGRATION SUMMARY:")
+    logger.info("- Using component-specific logging (utils.log)")
+    logger.info("- PATHS integration for automatic file discovery") 
+    logger.info("- Enhanced helper functions with timestamp support")
+    logger.info("- UTF-8 encoding by default")
+    logger.info("- Backwards compatible API")
+    logger.info("=" * 50)
