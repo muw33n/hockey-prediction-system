@@ -186,7 +186,7 @@ class FileHandler:
                        indent: int = 2,
                        ensure_ascii: bool = False) -> None:
         """
-        Bezpečně uloží data do JSON souboru.
+        Bezpečně uloží data do JSON souboru s pandas/numpy support.
         
         Args:
             data: Data k uložení
@@ -198,9 +198,52 @@ class FileHandler:
         filepath = Path(filepath)
         filepath.parent.mkdir(parents=True, exist_ok=True)
         
+        def convert_numpy_types(obj):
+            """Convert pandas/numpy types to JSON-serializable types"""
+            try:
+                import numpy as np
+                import pandas as pd
+                
+                if isinstance(obj, (np.integer)):
+                    return int(obj)
+                elif isinstance(obj, (np.floating)):
+                    return float(obj)
+                elif isinstance(obj, np.ndarray):
+                    return obj.tolist()
+                elif isinstance(obj, pd.Series):
+                    return obj.tolist()
+                elif isinstance(obj, pd.DataFrame):
+                    return obj.to_dict('records')
+                elif hasattr(obj, 'item'):  # numpy scalars
+                    return obj.item()
+                elif hasattr(obj, 'isoformat'):  # datetime objects
+                    return obj.isoformat()
+                elif isinstance(obj, dict):
+                    return {key: convert_numpy_types(value) for key, value in obj.items()}
+                elif isinstance(obj, (list, tuple)):
+                    return [convert_numpy_types(item) for item in obj]
+                elif hasattr(obj, 'dtype'):  # Generic pandas/numpy handling
+                    try:
+                        if 'int' in str(obj.dtype):
+                            return int(obj)
+                        elif 'float' in str(obj.dtype):
+                            return float(obj)
+                        else:
+                            return str(obj)
+                    except:
+                        return str(obj)
+                else:
+                    return obj
+            except ImportError:
+                # Fallback if pandas/numpy not available
+                return obj
+        
         try:
+            # Convert data before JSON serialization
+            converted_data = convert_numpy_types(data)
+            
             with open(filepath, 'w', encoding=encoding) as f:
-                json.dump(data, f, indent=indent, ensure_ascii=ensure_ascii)
+                json.dump(converted_data, f, indent=indent, ensure_ascii=ensure_ascii, default=str)
             logger.info(f"Successfully saved JSON to {filepath.name}")
         except Exception as e:
             logger.error(f"Failed to save JSON to {filepath}: {e}")
