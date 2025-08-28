@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Hockey Prediction System - Database Setup (Refaktorováno)
-========================================================
-Database setup s využitím centralizované konfigurace.
+Hockey Prediction System - Database Setup (ENHANCED MIGRATED)
+==============================================================
+Database setup s enhanced infrastructure: per-component logging,
+safe file handling, centralized paths a performance monitoring.
 
 Umístění: src/database/database_setup.py
 
-Vylepšení:
-- Centralizované cesty (PATHS)
-- Jednotná konfigurace (settings)
-- Centralizovaný logging
-- Bezpečné čtení souborů (file_handlers)
+MIGRATION NOTES:
+- Enhanced per-component logging (database.log)
+- Safe file handlers s automatic encoding detection  
+- Performance monitoring pro kritické operace
+- PATHS integration for all file operations
+- Robust error handling s detailed logging
 """
 
 import pandas as pd
@@ -19,156 +21,206 @@ import psycopg2
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
-import glob
-from typing import List, Dict, Optional, Set
 import re
+from typing import List, Dict, Optional, Set
+from pathlib import Path
 
-# === Nové centralizované komponenty ===
+# === ENHANCED MIGRATION: Centralized imports ===
 from config.paths import PATHS
-from config.settings import settings
-from config.logging_config import setup_logging, get_logger
-from src.utils.file_handlers import read_csv, FileHandler
-
-# Setup centralizovaného loggingu
-setup_logging(
-    log_level=settings.logging.log_level,
-    log_dir=PATHS.logs,
-    log_to_file=settings.logging.log_to_file
+from config.logging_config import (
+    setup_logging, 
+    get_component_logger, 
+    PerformanceLogger
+)
+from src.utils.file_handlers import (
+    read_csv,
+    load_latest_games_data,
+    FileHandler
 )
 
-logger = get_logger(__name__)
+# === ENHANCED MIGRATION: Setup per-component logging ===
+setup_logging(
+    log_level='INFO',
+    log_to_file=True,
+    component_files=True  # Key: per-component log files
+)
+
+# Component-specific logger for database operations
+logger = get_component_logger(__name__, 'database')
 
 
-class DatabaseManager:
-    """Manages database operations with centralized configuration and improved file handling"""
+class EnhancedDatabaseManager:
+    """
+    Enhanced Database Manager s kompletní migrací na enhanced infrastructure.
+    
+    Features:
+    - Per-component logging (database.log)
+    - Safe file handling s encoding detection
+    - Performance monitoring
+    - PATHS integration
+    - Robust error handling
+    """
     
     def __init__(self):
-        """Inicializace s centralizovanou konfigurací"""
-        # Databázová konfigurace ze settings
-        self.database_url = settings.database.connection_string
+        """Inicializace s enhanced infrastructure"""
+        
+        # === MIGRATION: Performance logger setup ===
+        self.perf_logger = PerformanceLogger(logger)
+        
+        # Database konfigurace - simplified (odstranil settings dependency)
+        # TODO: Move to environment variables or config file
+        self.database_url = self._get_database_url()
         self.engine = create_engine(self.database_url)
         self.Session = sessionmaker(bind=self.engine)
         
-        # Cesty z centrálního systému
+        # === MIGRATION: Enhanced paths s PATHS integration ===
         self.data_paths = {
             'nhl_data': PATHS.raw_data,
             'odds_data': PATHS.odds_data
         }
         
         # Zajištění existence adresářů
-        self.ensure_data_directories()
+        PATHS.ensure_directories()
         
-        # Log dostupných souborů při startu
-        self.log_available_files()
+        # Enhanced startup logging
+        self.log_enhanced_startup()
         
-        # Team name mapping z konfigurace (nebo zde)
+        # Team name mapping (unchanged, business logic preserved)
         self.team_name_mapping = {
             'Arizona Coyotes': 'Utah Mammoth',
             'Utah Hockey Club': 'Utah Mammoth'
         }
         
-        logger.info(f"🎯 DatabaseManager initialized")
-        logger.info(f"   Database: {settings.database.database}@{settings.database.host}")
+        logger.info("🎯 Enhanced DatabaseManager initialized successfully")
+        logger.info(f"   Database: {self._get_db_info()}")
         logger.info(f"   NHL Data: {self.data_paths['nhl_data']}")
         logger.info(f"   Odds Data: {self.data_paths['odds_data']}")
     
-    def ensure_data_directories(self):
-        """Zajištění existence datových adresářů"""
-        for dir_type, dir_path in self.data_paths.items():
-            if not dir_path.exists():
-                logger.warning(f"📁 Data directory not found: {dir_path}")
-                logger.info(f"Creating directory: {dir_path}")
-                dir_path.mkdir(parents=True, exist_ok=True)
-            else:
-                logger.info(f"📁 Data directory found: {dir_path}")
-    
-    def log_available_files(self):
-        """Logování dostupných datových souborů pro debugging"""
-        logger.info("🔍 Scanning for data files...")
+    def _get_database_url(self) -> str:
+        """Get database URL - simplified configuration"""
+        import os
         
-        # NHL data soubory
-        nhl_file_patterns = [
-            ('Games', 'nhl_games_*.csv'),
-            ('Team Stats', 'nhl_team_stats_*.csv'), 
-            ('Standings', 'nhl_standings_*.csv')
+        # Try environment variables first
+        if 'DATABASE_URL' in os.environ:
+            return os.environ['DATABASE_URL']
+        
+        # Fallback to default configuration
+        host = os.getenv('DB_HOST', 'localhost')
+        port = os.getenv('DB_PORT', '5432')
+        database = os.getenv('DB_NAME', 'hockey_db')
+        username = os.getenv('DB_USER', 'hockey_user')
+        password = os.getenv('DB_PASSWORD', 'hockey_pass')
+        
+        return f"postgresql://{username}:{password}@{host}:{port}/{database}"
+    
+    def _get_db_info(self) -> str:
+        """Get database info for logging"""
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(self.database_url)
+            return f"{parsed.hostname}:{parsed.port}/{parsed.path[1:]}"
+        except:
+            return "database connection"
+    
+    def log_enhanced_startup(self):
+        """Enhanced startup logging s file discovery"""
+        
+        logger.info("🔍 Enhanced startup - scanning for data files...")
+        
+        # === MIGRATION: Use PATHS for file discovery ===
+        file_patterns = [
+            ('Games', 'nhl_games_*.csv', self.data_paths['nhl_data']),
+            ('Team Stats', 'nhl_team_stats_*.csv', self.data_paths['nhl_data']), 
+            ('Standings', 'nhl_standings_*.csv', self.data_paths['nhl_data']),
+            ('Odds', 'nhl_odds_*.csv', self.data_paths['odds_data'])
         ]
         
-        logger.info(f"  📂 NHL Data Directory: {self.data_paths['nhl_data']}")
-        for file_type, pattern in nhl_file_patterns:
-            files = list(self.data_paths['nhl_data'].glob(pattern))
-            if files:
-                files.sort(reverse=True)  # Nejnovější první
-                logger.info(f"    {file_type}: {len(files)} files found")
-                for i, file in enumerate(files[:3]):  # Zobraz první 3
-                    age_indicator = "🆕" if i == 0 else "📄"
-                    logger.info(f"      {age_indicator} {file.name}")
-                if len(files) > 3:
-                    logger.info(f"      ... and {len(files) - 3} more files")
-            else:
-                logger.warning(f"    {file_type}: No files found matching '{pattern}'")
-        
-        # Odds soubory
-        logger.info(f"  📂 Odds Directory: {self.data_paths['odds_data']}")
-        odds_files = list(self.data_paths['odds_data'].glob('nhl_odds_*.csv'))
-        if odds_files:
-            odds_files.sort(reverse=True)
-            logger.info(f"    Odds: {len(odds_files)} files found")
-            for i, file in enumerate(odds_files[:3]):
-                age_indicator = "🆕" if i == 0 else "📄"
-                logger.info(f"      {age_indicator} {file.name}")
-            if len(odds_files) > 3:
-                logger.info(f"      ... and {len(odds_files) - 3} more files")
-        else:
-            logger.warning(f"    Odds: No files found matching 'nhl_odds_*.csv'")
+        for file_type, pattern, directory in file_patterns:
+            try:
+                files = list(directory.glob(pattern))
+                if files:
+                    files.sort(reverse=True)  # Nejnovější první
+                    logger.info(f"  📁 {file_type}: {len(files)} files found")
+                    
+                    # Show latest files with enhanced timestamp extraction
+                    for i, file in enumerate(files[:3]):
+                        timestamp = self.extract_timestamp_from_filename(file)
+                        age_indicator = "🆕" if i == 0 else "📄"
+                        logger.info(f"    {age_indicator} {file.name} ({timestamp})")
+                    
+                    if len(files) > 3:
+                        logger.info(f"    ... and {len(files) - 3} more files")
+                else:
+                    logger.warning(f"  📁 {file_type}: No files found matching '{pattern}'")
+                    
+            except Exception as e:
+                logger.error(f"Error scanning {file_type}: {e}")
     
-    def extract_timestamp_from_filename(self, filename: str) -> str:
-        """Extrakce timestamp z názvu souboru"""
+    def extract_timestamp_from_filename(self, filename: Path) -> str:
+        """Enhanced timestamp extraction s better error handling"""
         try:
-            # Extrahuj timestamp ze vzoru: nhl_games_20250616_190551.csv
+            # Extract timestamp from pattern: nhl_games_20250616_190551.csv
             match = re.search(r'_(\d{8}_\d{6})\.csv$', str(filename))
             if match:
                 timestamp_str = match.group(1)
-                # Převeď na čitelný formát
+                # Convert to readable format
                 date_part = timestamp_str[:8]
                 time_part = timestamp_str[9:]
                 formatted_date = f"{date_part[:4]}-{date_part[4:6]}-{date_part[6:8]}"
                 formatted_time = f"{time_part[:2]}:{time_part[2:4]}:{time_part[4:6]}"
                 return f"{formatted_date} {formatted_time}"
             return "Unknown timestamp"
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Timestamp extraction failed for {filename}: {e}")
             return "Invalid timestamp"
     
-    def extract_sort_key(self, filepath):
-        """Extrakce klíče pro řazení souborů"""
+    def extract_sort_key(self, filepath: Path) -> str:
+        """Enhanced sort key extraction"""
         try:
             match = re.search(r'_(\d{8}_\d{6})\.csv$', filepath.name)
-            if match:
-                return match.group(1)
-            return "00000000_000000"
+            return match.group(1) if match else "00000000_000000"
         except Exception:
             return "00000000_000000"
+    
+    def check_permissions(self) -> bool:
+        """Enhanced permission check s better error reporting"""
         
-    def check_permissions(self):
-        """Kontrola databázových oprávnění"""
+        self.perf_logger.start_timer('permission_check')
+        
         try:
             with self.engine.connect() as conn:
+                # Test table creation and drop
                 conn.execute(text("CREATE TABLE IF NOT EXISTS test_permissions (id SERIAL PRIMARY KEY)"))
                 conn.execute(text("DROP TABLE IF EXISTS test_permissions"))
                 conn.commit()
-                logger.info("✅ Database permissions OK")
+                
+                duration = self.perf_logger.end_timer('permission_check')
+                logger.info("✅ Database permissions verified")
                 return True
+                
         except Exception as e:
+            self.perf_logger.end_timer('permission_check')
             logger.error(f"❌ Permission check failed: {e}")
-            logger.error("💡 Please run the permission fix SQL commands as postgres user")
+            
+            # Enhanced troubleshooting guidance
+            if "permission denied" in str(e).lower():
+                logger.error("💡 Permission issue detected. Run these commands as postgres user:")
+                logger.error("   GRANT ALL ON SCHEMA public TO hockey_user;")
+                logger.error("   GRANT ALL ON ALL TABLES IN SCHEMA public TO hockey_user;")
+                logger.error("   GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO hockey_user;")
+            
             return False
     
-    def create_tables(self):
-        """Vytvoření všech potřebných tabulek s aktualizovaným schématem"""
+    def create_tables(self) -> bool:
+        """Enhanced table creation s performance monitoring"""
         
         if not self.check_permissions():
             logger.error("❌ Insufficient permissions. Please fix permissions first.")
             return False
         
+        self.perf_logger.start_timer('table_creation')
+        
+        # Table creation SQL (unchanged - preserve business logic)
         create_tables_sql = """
         -- Drop existing tables if they exist
         DROP TABLE IF EXISTS value_bets CASCADE;
@@ -245,7 +297,7 @@ class DatabaseManager:
             from_team_id INTEGER REFERENCES teams(id),
             to_team_id INTEGER REFERENCES teams(id),
             change_date DATE NOT NULL,
-            change_type VARCHAR(50) NOT NULL, -- relocation, rename, expansion, merger, fold, revival
+            change_type VARCHAR(50) NOT NULL,
             from_city VARCHAR(100),
             to_city VARCHAR(100),
             from_name VARCHAR(100),
@@ -259,32 +311,30 @@ class DatabaseManager:
         CREATE TABLE games (
             id SERIAL PRIMARY KEY,
             date DATE NOT NULL,
-            -- Store datetime in Eastern Time (NHL standard)
             datetime_et TIMESTAMP WITHOUT TIME ZONE,
             season INTEGER NOT NULL,
             league_id INTEGER REFERENCES leagues(id),
             home_team_id INTEGER REFERENCES teams(id),
             away_team_id INTEGER REFERENCES teams(id),
-            venue_id INTEGER REFERENCES venues(id), -- Will be populated in future
+            venue_id INTEGER REFERENCES venues(id),
             home_score INTEGER,
             away_score INTEGER,
             overtime_shootout VARCHAR(20),
             status VARCHAR(20) DEFAULT 'scheduled',
-            game_type VARCHAR(50) DEFAULT 'regular', -- regular, playoff, exhibition, outdoor, neutral
-            -- Original data tracking
+            game_type VARCHAR(50) DEFAULT 'regular',
             scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             data_source VARCHAR(100),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(date, home_team_id, away_team_id)
         );
         
-        -- Game URLs table for storing additional links
+        -- Game URLs table
         CREATE TABLE game_urls (
             id SERIAL PRIMARY KEY,
             game_id INTEGER REFERENCES games(id) ON DELETE CASCADE,
-            url_type VARCHAR(50) NOT NULL, -- 'boxscore', 'betting', 'stats', etc.
+            url_type VARCHAR(50) NOT NULL,
             url TEXT NOT NULL,
-            source VARCHAR(100), -- 'hockey-reference', 'betexplorer', etc.
+            source VARCHAR(100),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(game_id, url_type, source)
         );
@@ -294,25 +344,18 @@ class DatabaseManager:
             id SERIAL PRIMARY KEY,
             game_id INTEGER REFERENCES games(id) ON DELETE CASCADE,
             bookmaker VARCHAR(100) NOT NULL,
-            market_type VARCHAR(50) NOT NULL, -- 'moneyline_2way', 'over_under', etc.
-            
-            -- Home team odds
+            market_type VARCHAR(50) NOT NULL,
             home_odd DECIMAL(8,4),
             home_opening_odd DECIMAL(8,4),
             home_opening_datetime TIMESTAMP,
             home_last_update TIMESTAMP,
-            
-            -- Away team odds
             away_odd DECIMAL(8,4),
             away_opening_odd DECIMAL(8,4),
             away_opening_datetime TIMESTAMP,
             away_last_update TIMESTAMP,
-            
-            -- Metadata
             scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             data_source VARCHAR(100),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            
             UNIQUE(game_id, bookmaker, market_type)
         );
         
@@ -331,43 +374,30 @@ class DatabaseManager:
             goals_against INTEGER,
             shootout_wins INTEGER,
             shootout_losses INTEGER,
-            
-            -- Advanced stats
-            srs DECIMAL(6,3), -- Simple Rating System
-            sos DECIMAL(6,3), -- Strength of Schedule
+            srs DECIMAL(6,3),
+            sos DECIMAL(6,3),
             goals_for_per_game DECIMAL(5,2),
             goals_against_per_game DECIMAL(5,2),
-            
-            -- Power play stats
             power_play_goals INTEGER,
             power_play_opportunities INTEGER,
             power_play_percentage DECIMAL(5,2),
-            
-            -- Penalty kill stats
             penalty_kill_percentage DECIMAL(5,2),
             short_handed_goals INTEGER,
             short_handed_goals_allowed INTEGER,
-            
-            -- Shooting stats
             shots INTEGER,
             shot_percentage DECIMAL(5,2),
             shots_against INTEGER,
             save_percentage DECIMAL(5,3),
             shutouts INTEGER,
-            
-            -- Discipline
             penalties_per_game DECIMAL(5,2),
             opponent_penalties_per_game DECIMAL(5,2),
-            
-            -- Other
             average_age DECIMAL(4,1),
-            
             scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(team_id, season)
         );
         
-        -- Goalie stats table
+        -- Additional tables (goalie_stats, player_stats, predictions, value_bets)
         CREATE TABLE goalie_stats (
             id SERIAL PRIMARY KEY,
             team_id INTEGER REFERENCES teams(id),
@@ -385,7 +415,6 @@ class DatabaseManager:
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         
-        -- Player stats table
         CREATE TABLE player_stats (
             id SERIAL PRIMARY KEY,
             team_id INTEGER REFERENCES teams(id),
@@ -403,7 +432,6 @@ class DatabaseManager:
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         
-        -- Predictions table
         CREATE TABLE predictions (
             id SERIAL PRIMARY KEY,
             game_id INTEGER REFERENCES games(id),
@@ -412,18 +440,17 @@ class DatabaseManager:
             home_win_probability DECIMAL(5,4),
             away_win_probability DECIMAL(5,4),
             prediction_datetime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            features_used TEXT, -- JSON string of features
+            features_used TEXT,
             confidence_score DECIMAL(5,4),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         
-        -- Value bets table
         CREATE TABLE value_bets (
             id SERIAL PRIMARY KEY,
             game_id INTEGER REFERENCES games(id),
             odds_id INTEGER REFERENCES odds(id),
             prediction_id INTEGER REFERENCES predictions(id),
-            bet_type VARCHAR(50), -- 'home', 'away', 'over', 'under'
+            bet_type VARCHAR(50),
             recommended_stake DECIMAL(10,2),
             expected_value DECIMAL(8,4),
             kelly_percentage DECIMAL(5,4),
@@ -440,8 +467,6 @@ class DatabaseManager:
         CREATE INDEX idx_team_stats_season ON team_stats(season);
         CREATE INDEX idx_predictions_game ON predictions(game_id);
         CREATE INDEX idx_value_bets_game ON value_bets(game_id);
-        
-        -- New indexes for team/franchise tracking
         CREATE INDEX idx_teams_franchise ON teams(franchise_id);
         CREATE INDEX idx_teams_effective_dates ON teams(effective_from, effective_to);
         CREATE INDEX idx_teams_current ON teams(is_current) WHERE is_current = TRUE;
@@ -449,7 +474,7 @@ class DatabaseManager:
         CREATE INDEX idx_team_history_date ON team_history(change_date);
         CREATE INDEX idx_venues_active ON venues(is_active) WHERE is_active = TRUE;
         
-        -- Helper views for easier querying
+        -- Helper views
         CREATE VIEW current_teams AS
         SELECT t.*, f.franchise_name 
         FROM teams t 
@@ -473,20 +498,27 @@ class DatabaseManager:
             with self.engine.connect() as conn:
                 conn.execute(text(create_tables_sql))
                 conn.commit()
-                logger.info("✅ All tables created successfully")
+                
+                duration = self.perf_logger.end_timer('table_creation')
+                logger.info("✅ All database tables created successfully")
                 return True
                 
         except Exception as e:
+            self.perf_logger.end_timer('table_creation')
             logger.error(f"❌ Error creating tables: {e}")
+            
             if "permission denied" in str(e).lower():
                 logger.error("💡 Permission issue detected. Please run these commands as postgres user:")
                 logger.error("   GRANT ALL ON SCHEMA public TO hockey_user;")
                 logger.error("   GRANT ALL ON ALL TABLES IN SCHEMA public TO hockey_user;")
                 logger.error("   GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO hockey_user;")
+            
             return False
     
-    def insert_initial_data(self):
-        """Insert initial leagues, franchises and teams data with proper history tracking"""
+    def insert_initial_data(self) -> bool:
+        """Enhanced initial data insertion s performance tracking"""
+        
+        self.perf_logger.start_timer('initial_data_insertion')
         
         try:
             with self.engine.connect() as conn:
@@ -504,11 +536,10 @@ class DatabaseManager:
                 if league_row:
                     nhl_league_id = league_row[0]
                 else:
-                    # League already exists, get its ID
                     result = conn.execute(text("SELECT id FROM leagues WHERE name = 'NHL'"))
                     nhl_league_id = result.fetchone()[0]
                 
-                # Insert franchises with proper historical tracking
+                # Insert franchises (business logic unchanged)
                 franchises_data = [
                     (1, 'Boston Bruins Franchise', '1924-11-01', 'Boston'),
                     (2, 'Buffalo Sabres Franchise', '1970-05-12', 'Buffalo'),
@@ -518,24 +549,24 @@ class DatabaseManager:
                     (6, 'Ottawa Senators Franchise', '1992-12-16', 'Ottawa'),
                     (7, 'Tampa Bay Lightning Franchise', '1992-12-16', 'Tampa Bay'),
                     (8, 'Toronto Maple Leafs Franchise', '1917-11-26', 'Toronto'),
-                    (9, 'Carolina Hurricanes Franchise', '1979-06-22', 'Hartford'),  # Originally Hartford Whalers
+                    (9, 'Carolina Hurricanes Franchise', '1979-06-22', 'Hartford'),
                     (10, 'Columbus Blue Jackets Franchise', '2000-06-25', 'Columbus'),
-                    (11, 'New Jersey Devils Franchise', '1974-06-11', 'Kansas City'),  # Originally Kansas City Scouts
+                    (11, 'New Jersey Devils Franchise', '1974-06-11', 'Kansas City'),
                     (12, 'New York Islanders Franchise', '1972-11-08', 'Uniondale'),
                     (13, 'New York Rangers Franchise', '1926-05-15', 'New York'),
                     (14, 'Philadelphia Flyers Franchise', '1967-06-05', 'Philadelphia'),
                     (15, 'Pittsburgh Penguins Franchise', '1967-06-05', 'Pittsburgh'),
                     (16, 'Washington Capitals Franchise', '1974-06-11', 'Washington'),
                     (17, 'Chicago Blackhawks Franchise', '1926-05-15', 'Chicago'),
-                    (18, 'Colorado Avalanche Franchise', '1979-06-22', 'Quebec City'),  # Originally Quebec Nordiques
-                    (19, 'Dallas Stars Franchise', '1967-06-05', 'Minneapolis'),  # Originally Minnesota North Stars
+                    (18, 'Colorado Avalanche Franchise', '1979-06-22', 'Quebec City'),
+                    (19, 'Dallas Stars Franchise', '1967-06-05', 'Minneapolis'),
                     (20, 'Minnesota Wild Franchise', '2000-06-25', 'Saint Paul'),
                     (21, 'Nashville Predators Franchise', '1998-06-25', 'Nashville'),
                     (22, 'St. Louis Blues Franchise', '1967-06-05', 'St. Louis'),
-                    (23, 'Arizona/Utah Franchise', '1979-06-22', 'Winnipeg'),  # Originally Winnipeg Jets
-                    (24, 'Winnipeg Jets Franchise', '1999-06-25', 'Atlanta'),  # Originally Atlanta Thrashers
+                    (23, 'Arizona/Utah Franchise', '1979-06-22', 'Winnipeg'),
+                    (24, 'Winnipeg Jets Franchise', '1999-06-25', 'Atlanta'),
                     (25, 'Anaheim Ducks Franchise', '1993-06-15', 'Anaheim'),
-                    (26, 'Calgary Flames Franchise', '1972-06-06', 'Atlanta'),  # Originally Atlanta Flames
+                    (26, 'Calgary Flames Franchise', '1972-06-06', 'Atlanta'),
                     (27, 'Edmonton Oilers Franchise', '1979-06-22', 'Edmonton'),
                     (28, 'Los Angeles Kings Franchise', '1967-06-05', 'Los Angeles'),
                     (29, 'San Jose Sharks Franchise', '1991-05-09', 'San Jose'),
@@ -544,6 +575,7 @@ class DatabaseManager:
                     (32, 'Vegas Golden Knights Franchise', '2017-06-22', 'Las Vegas'),
                 ]
                 
+                franchises_inserted = 0
                 for franchise_id, name, founded_date, founded_city in franchises_data:
                     franchise_sql = """
                     INSERT INTO franchises (id, franchise_name, founded_date, founded_city, is_active)
@@ -556,8 +588,9 @@ class DatabaseManager:
                         'founded_date': founded_date,
                         'founded_city': founded_city
                     })
+                    franchises_inserted += 1
                 
-                # Insert current team identities
+                # Insert current teams (business logic unchanged)
                 current_teams = [
                     (1, 'Boston Bruins', 'Boston', 'Eastern', 'Atlantic', 'BOS', '1924-11-01'),
                     (2, 'Buffalo Sabres', 'Buffalo', 'Eastern', 'Atlantic', 'BUF', '1970-05-12'),
@@ -618,8 +651,7 @@ class DatabaseManager:
                     except Exception as e:
                         logger.warning(f"Failed to insert team {name}: {e}")
                 
-                # Insert key historical team transitions
-                # Arizona Coyotes history
+                # Insert historical Arizona/Utah transitions
                 historical_arizona_teams = [
                     (23, 'Winnipeg Jets', 'Winnipeg', 'Western', 'Smythe', 'WPG', '1979-10-10', '1996-04-13'),
                     (23, 'Phoenix Coyotes', 'Phoenix', 'Western', 'Pacific', 'PHX', '1996-04-13', '2014-06-27'),
@@ -648,59 +680,52 @@ class DatabaseManager:
                     })
                 
                 conn.commit()
-                logger.info(f"✅ Inserted NHL league, franchises and {teams_inserted} current teams")
+                
+                duration = self.perf_logger.end_timer('initial_data_insertion')
+                logger.info(f"✅ Inserted NHL league, {franchises_inserted} franchises and {teams_inserted} current teams")
                 logger.info("✅ Historical team transitions configured (Arizona/Utah)")
                 return True
                 
         except Exception as e:
+            self.perf_logger.end_timer('initial_data_insertion')
             logger.error(f"❌ Error inserting initial data: {e}")
             return False
     
     def detect_team_name_column(self, df: pd.DataFrame) -> str:
-        """Automatická detekce sloupce obsahujícího názvy týmů"""
-        # Běžné názvy sloupců pro názvy týmů
+        """Enhanced team column detection (unchanged business logic)"""
         team_column_candidates = [
-            'Team',  # Nejběžnější
-            '',      # Nepojmenovaný první sloupec
-            ':',     # Hockey Reference formát
-            'team',
-            'Team Name',
-            'Tm'
+            'Team', '', ':', 'team', 'Team Name', 'Tm'
         ]
         
-        # Zkontroluj každý kandidát
         for col_name in team_column_candidates:
             if col_name in df.columns:
-                # Ověř, že obsahuje týmová data
                 sample_values = df[col_name].dropna().astype(str).str.strip()
                 sample_values = sample_values[sample_values != '']
                 
                 if len(sample_values) > 0:
-                    # Zkontroluj, zda hodnoty vypadají jako názvy týmů
                     first_value = sample_values.iloc[0]
                     if len(first_value) > 2 and not first_value.isdigit():
                         logger.info(f"🎯 Detected team name column: '{col_name}'")
                         logger.info(f"   Sample values: {list(sample_values.head(3))}")
                         return col_name
         
-        # Pokud nebyl nalezen žádný, zkus najít stringový sloupec s rozumným obsahem
+        # Fallback detection
         logger.warning("⚠️ Standard team name columns not found, attempting auto-detection...")
         
         for col_name in df.columns:
-            if df[col_name].dtype == 'object':  # Stringový sloupec
+            if df[col_name].dtype == 'object':
                 sample_values = df[col_name].dropna().astype(str).str.strip()
                 sample_values = sample_values[sample_values != '']
                 
                 if len(sample_values) > 0:
                     first_value = sample_values.iloc[0]
-                    # Hledej NHL týmové vzory
                     nhl_indicators = ['Bruins', 'Rangers', 'Kings', 'Wings', 'Leafs', 'Flames', 'Stars', 'Wild']
                     if any(indicator in first_value for indicator in nhl_indicators):
                         logger.info(f"🎯 Auto-detected team name column: '{col_name}'")
                         logger.info(f"   Sample values: {list(sample_values.head(3))}")
                         return col_name
         
-        # Fallback - použij první stringový sloupec
+        # Final fallback
         string_columns = df.select_dtypes(include=['object']).columns.tolist()
         if string_columns:
             fallback_col = string_columns[0]
@@ -710,16 +735,13 @@ class DatabaseManager:
         raise ValueError("❌ Could not detect team name column in CSV")
     
     def get_team_id_for_date(self, team_name: str, game_date: str, conn) -> Optional[int]:
-        """Získání team ID pro konkrétní datum, zpracování historických změn týmů"""
-        
-        # Normalizace názvu týmu pro známé variace
+        """Enhanced team ID resolution (business logic unchanged)"""
         normalized_name = self.normalize_team_name(team_name)
         
-        # Převeď game_date na date objekt pokud je to string
         if isinstance(game_date, str):
             game_date = pd.to_datetime(game_date).date()
         
-        # Nejdříve zkus najít současný tým s přesným názvem
+        # Try current team first
         current_team_sql = """
         SELECT id FROM teams 
         WHERE name = :team_name AND is_current = TRUE
@@ -730,7 +752,7 @@ class DatabaseManager:
         if current_team:
             return current_team[0]
         
-        # Pokud nenalezen, hledej v historických týmech pro konkrétní datum
+        # Try historical team for specific date
         historical_team_sql = """
         SELECT id FROM teams 
         WHERE name = :team_name 
@@ -746,126 +768,69 @@ class DatabaseManager:
         if historical_team:
             return historical_team[0]
         
-        # Pokud stále nenalezen, zkus najít podle franšízy a mapovat na současný tým
+        # Try franchise mapping
         franchise_mapping = {
             'Arizona Coyotes': 'Utah Mammoth',
             'Utah Hockey Club': 'Utah Mammoth',
             'Phoenix Coyotes': 'Utah Mammoth',
-            'Winnipeg Jets': self._resolve_jets_name(game_date),  # Dvě různé Jets franšízy
+            'Winnipeg Jets': self._resolve_jets_name(game_date),
         }
         
         if normalized_name in franchise_mapping:
             mapped_name = franchise_mapping[normalized_name]
             return self.get_team_id_for_date(mapped_name, game_date, conn)
         
-        logger.warning(f"Team not found: {team_name} (normalized: {normalized_name}) for date {game_date}")
+        logger.debug(f"Team not found: {team_name} (normalized: {normalized_name}) for date {game_date}")
         return None
     
     def _resolve_jets_name(self, game_date) -> str:
-        """Rozlišení které Winnipeg Jets franšíza na základě data"""
+        """Resolve Jets franchise (business logic unchanged)"""
         cutoff_date = pd.to_datetime('2011-05-31').date()
         if isinstance(game_date, str):
             game_date = pd.to_datetime(game_date).date()
         
         if game_date <= cutoff_date:
-            # Původní Jets franšíza (nyní Utah Mammoth lineage)
-            return 'Utah Mammoth'  # Mapuj na současnou identitu
+            return 'Utah Mammoth'
         else:
-            # Nová Jets franšíza (z Atlanty)
             return 'Winnipeg Jets'
     
     def normalize_team_name(self, team_name: str) -> str:
-        """Normalizace názvů týmů pro konzistenci"""
-        # Odstranění běžných přípon/prefixů
+        """Enhanced team name normalization"""
         team_name = team_name.strip()
         
-        # Základní mapování pro konzistenci dat
         basic_mappings = {
             'Utah Hockey Club': 'Utah Mammoth',
-            'Arizona Coyotes': 'Utah Mammoth',  # Mapuj historické na současné
+            'Arizona Coyotes': 'Utah Mammoth',
         }
         
         return basic_mappings.get(team_name, team_name)
     
-    def import_scraped_data(self):
-        """Import dat z CSV souborů se zdokonalenou strategií - eliminuje duplikaci"""
+    def find_latest_data_files(self, base_name: str, limit: int = 1) -> List[Path]:
+        """Enhanced file discovery s PATHS integration"""
         
         try:
-            # Import her - najdi nejnovější soubor v raw_data/
-            games_files = self.find_latest_data_files('nhl_games')
-            for file_path in games_files:
-                logger.info(f"Importing games from {file_path.name}...")
-                self.import_games_data(file_path)
-            
-            if not games_files:
-                logger.warning(f"No games files found in {self.data_paths['nhl_data']}")
-            
-            # PRIMÁRNÍ: Import team stats (komplexní data)
-            stats_files = self.find_latest_data_files('nhl_team_stats')
-            teams_with_stats = set()
-            
-            for file_path in stats_files:
-                logger.info(f"Importing comprehensive team stats from {file_path.name}...")
-                imported_teams = self.import_team_stats_data(file_path, return_teams=True)
-                teams_with_stats.update(imported_teams)
-            
-            # FALLBACK: Import standings pouze pro týmy/sezony chybějící v team_stats
-            standings_files = self.find_latest_data_files('nhl_standings')
-            for file_path in standings_files:
-                logger.info(f"Importing standings as fallback from {file_path.name}...")
-                self.import_standings_as_fallback(file_path, exclude_teams=teams_with_stats)
-            
-            # Report výsledků import strategie
-            self.report_import_strategy_results()
-            
-            # Import odds - hledej v odds_data/ adresáři
-            odds_files = list(self.data_paths['odds_data'].glob('nhl_odds_*.csv'))
-            
-            if odds_files:
-                odds_files.sort(key=self.extract_sort_key, reverse=True)
-                logger.info(f"📊 Found {len(odds_files)} odds files in {self.data_paths['odds_data']}")
-                
-                for file_path in odds_files:
-                    timestamp = self.extract_timestamp_from_filename(file_path)
-                    logger.info(f"Importing odds from {file_path.name} (scraped: {timestamp})...")
-                    self.import_odds_data(file_path)
-            else:
-                logger.warning(f"No odds files found in {self.data_paths['odds_data']}")
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Error importing scraped data: {e}")
-            return False
-    
-    def find_latest_data_files(self, base_name: str, limit: int = 1) -> List:
-        """Najdi nejnovější datové soubory pro daný základní název"""
-        
-        try:
-            # Urči který adresář hledat na základě typu souboru
+            # === MIGRATION: Use PATHS for directory determination ===
             if base_name.startswith('nhl_odds'):
-                search_dir = self.data_paths['odds_data']
+                search_dir = PATHS.odds_data
             else:
-                search_dir = self.data_paths['nhl_data']
+                search_dir = PATHS.raw_data
             
-            # Pattern: nhl_games_20250616_190551.csv
             files = list(search_dir.glob(f"{base_name}_*.csv"))
             
             if not files:
                 logger.warning(f"No files found matching pattern: {base_name}_*.csv in {search_dir}")
                 return []
             
-            # Seřaď podle timestamp extrahovaného z názvu souboru
-            files.sort(key=self.extract_sort_key, reverse=True)  # Nejnovější první
+            # Sort by timestamp
+            files.sort(key=self.extract_sort_key, reverse=True)
             
-            # Zaloguj co jsme našli
+            # Enhanced logging
             logger.info(f"📄 Found {len(files)} {base_name} files in {search_dir}:")
             for i, file in enumerate(files[:limit]):
                 timestamp = self.extract_timestamp_from_filename(file)
                 age_indicator = "🆕" if i == 0 else "📄"
                 logger.info(f"  {age_indicator} {file.name} (scraped: {timestamp})")
             
-            # Vrať nejnovější soubor(y)
             selected_files = files[:limit]
             
             if selected_files:
@@ -879,21 +844,20 @@ class DatabaseManager:
             logger.error(f"Error finding files for {base_name}: {e}")
             return []
     
-    def verify_file_integrity(self, file_path) -> bool:
-        """Rychlé ověření, že CSV soubor je čitelný a má očekávanou strukturu"""
+    def verify_file_integrity(self, file_path: Path) -> bool:
+        """Enhanced file verification s safe file handlers"""
         
         try:
-            # Zkus načíst jen header a prvních pár řádků pomocí bezpečného čtení
+            # === MIGRATION: Use enhanced safe file handlers ===
             df = read_csv(file_path, nrows=5)
             
             if df.empty:
                 logger.warning(f"File appears to be empty: {file_path}")
                 return False
             
-            # Zaloguj základní info o souboru
-            # Spočítej celkový počet řádků
+            # Count total rows safely
             with open(file_path, 'r', encoding='utf-8') as f:
-                total_rows = sum(1 for line in f) - 1  # Odečti header
+                total_rows = sum(1 for line in f) - 1
             
             logger.info(f"📊 File validation: {file_path.name}")
             logger.info(f"  Rows: {total_rows:,}")
@@ -906,24 +870,177 @@ class DatabaseManager:
             logger.error(f"File integrity check failed for {file_path}: {e}")
             return False
     
-    def import_team_stats_data(self, file_path, return_teams: bool = False):
-        """Import komplexních team stats se sledováním zpracovaných týmů"""
+    def import_scraped_data(self) -> bool:
+        """Enhanced data import s performance monitoring"""
         
-        # Ověř integritu souboru nejdříve
+        self.perf_logger.start_timer('full_data_import')
+        
+        try:
+            # Import games
+            self.perf_logger.start_timer('games_import')
+            games_files = self.find_latest_data_files('nhl_games')
+            for file_path in games_files:
+                logger.info(f"Importing games from {file_path.name}...")
+                self.import_games_data(file_path)
+            self.perf_logger.end_timer('games_import')
+            
+            if not games_files:
+                logger.warning(f"No games files found in {self.data_paths['nhl_data']}")
+            
+            # Import team stats (comprehensive)
+            self.perf_logger.start_timer('team_stats_import')
+            stats_files = self.find_latest_data_files('nhl_team_stats')
+            teams_with_stats = set()
+            
+            for file_path in stats_files:
+                logger.info(f"Importing comprehensive team stats from {file_path.name}...")
+                imported_teams = self.import_team_stats_data(file_path, return_teams=True)
+                teams_with_stats.update(imported_teams)
+            self.perf_logger.end_timer('team_stats_import')
+            
+            # Import standings as fallback
+            self.perf_logger.start_timer('standings_fallback_import')
+            standings_files = self.find_latest_data_files('nhl_standings')
+            for file_path in standings_files:
+                logger.info(f"Importing standings as fallback from {file_path.name}...")
+                self.import_standings_as_fallback(file_path, exclude_teams=teams_with_stats)
+            self.perf_logger.end_timer('standings_fallback_import')
+            
+            # Report strategy results
+            self.report_import_strategy_results()
+            
+            # Import odds
+            self.perf_logger.start_timer('odds_import')
+            odds_files = list(self.data_paths['odds_data'].glob('nhl_odds_*.csv'))
+            
+            if odds_files:
+                odds_files.sort(key=self.extract_sort_key, reverse=True)
+                logger.info(f"📊 Found {len(odds_files)} odds files in {self.data_paths['odds_data']}")
+                
+                for file_path in odds_files:
+                    timestamp = self.extract_timestamp_from_filename(file_path)
+                    logger.info(f"Importing odds from {file_path.name} (scraped: {timestamp})...")
+                    self.import_odds_data(file_path)
+            else:
+                logger.warning(f"No odds files found in {self.data_paths['odds_data']}")
+            self.perf_logger.end_timer('odds_import')
+            
+            total_duration = self.perf_logger.end_timer('full_data_import')
+            logger.info(f"✅ Complete data import finished in {total_duration:.2f}s")
+            
+            return True
+            
+        except Exception as e:
+            self.perf_logger.end_timer('full_data_import')
+            logger.error(f"❌ Error importing scraped data: {e}")
+            return False
+    
+    def import_games_data(self, file_path: Path):
+        """Enhanced games import (core logic unchanged)"""
+        
+        if not self.verify_file_integrity(file_path):
+            logger.error(f"Skipping import of {file_path} due to integrity issues")
+            return
+        
+        try:
+            # === MIGRATION: Use safe file handlers ===
+            df = read_csv(file_path)
+            games_imported = 0
+            games_skipped = 0
+            
+            logger.info(f"🎯 Starting import of {len(df)} games from {file_path.name}")
+            
+            with self.engine.connect() as conn:
+                for _, row in df.iterrows():
+                    try:
+                        game_date = pd.to_datetime(row['date']).date()
+                        
+                        home_team_id = self.get_team_id_for_date(row['home_team'], game_date, conn)
+                        away_team_id = self.get_team_id_for_date(row['visitor_team'], game_date, conn)
+                        
+                        if not home_team_id or not away_team_id:
+                            logger.debug(f"Teams not found: {row['home_team']}, {row['visitor_team']} for {game_date}")
+                            games_skipped += 1
+                            continue
+                        
+                        datetime_et = pd.to_datetime(row.get('datetime')) if pd.notna(row.get('datetime')) else None
+                        
+                        game_sql = """
+                        INSERT INTO games (date, datetime_et, season, league_id, home_team_id, away_team_id,
+                                         venue_id, home_score, away_score, overtime_shootout, status, data_source)
+                        VALUES (:date, :datetime_et, :season, 1, :home_team_id, :away_team_id,
+                               NULL, :home_score, :away_score, :overtime_shootout, :status, 'hockey-reference')
+                        ON CONFLICT (date, home_team_id, away_team_id) DO UPDATE SET
+                            datetime_et = EXCLUDED.datetime_et,
+                            home_score = EXCLUDED.home_score,
+                            away_score = EXCLUDED.away_score,
+                            status = EXCLUDED.status
+                        RETURNING id;
+                        """
+                        
+                        result = conn.execute(text(game_sql), {
+                            'date': game_date,
+                            'datetime_et': datetime_et,
+                            'season': int(row['season']),
+                            'home_team_id': home_team_id,
+                            'away_team_id': away_team_id,
+                            'home_score': int(row['home_score']) if pd.notna(row['home_score']) else None,
+                            'away_score': int(row['visitor_score']) if pd.notna(row['visitor_score']) else None,
+                            'overtime_shootout': row.get('overtime_shootout'),
+                            'status': row.get('status', 'completed')
+                        })
+                        
+                        game_row = result.fetchone()
+                        if game_row:
+                            game_id = game_row[0]
+                            
+                            # Insert boxscore URL if available
+                            if pd.notna(row.get('boxscore_url')):
+                                url_sql = """
+                                INSERT INTO game_urls (game_id, url_type, url, source)
+                                VALUES (:game_id, 'boxscore', :url, 'hockey-reference')
+                                ON CONFLICT (game_id, url_type, source) DO NOTHING;
+                                """
+                                conn.execute(text(url_sql), {
+                                    'game_id': game_id,
+                                    'url': row['boxscore_url']
+                                })
+                        
+                        games_imported += 1
+                        
+                        if games_imported % 100 == 0:
+                            logger.info(f"  📈 Progress: {games_imported} games imported...")
+                        
+                    except Exception as e:
+                        logger.error(f"Error importing game row: {e}")
+                        games_skipped += 1
+                        continue
+                
+                conn.commit()
+                logger.info(f"✅ Games import completed:")
+                logger.info(f"  📊 Imported: {games_imported} games")
+                logger.info(f"  ⚠️  Skipped: {games_skipped} games")
+                logger.info(f"  📁 Source: {file_path.name}")
+                
+        except Exception as e:
+            logger.error(f"❌ Error importing games data: {e}")
+    
+    def import_team_stats_data(self, file_path: Path, return_teams: bool = False):
+        """Enhanced team stats import (core logic preserved)"""
+        
         if not self.verify_file_integrity(file_path):
             logger.error(f"Skipping import of {file_path} due to integrity issues")
             return set() if return_teams else None
         
         try:
-            # Použij bezpečné čtení CSV
+            # === MIGRATION: Use safe file handlers ===
             df = read_csv(file_path)
             
-            # Detekuj sloupec s názvy týmů automaticky
             team_column = self.detect_team_name_column(df)
             
             stats_imported = 0
             stats_skipped = 0
-            processed_teams = set()  # Sleduj (team_id, season) páry
+            processed_teams = set()
             
             logger.info(f"📈 Starting import of {len(df)} comprehensive team stats from {file_path.name}")
             logger.info(f"🎯 Using team name column: '{team_column}'")
@@ -931,7 +1048,6 @@ class DatabaseManager:
             with self.engine.connect() as conn:
                 for _, row in df.iterrows():
                     try:
-                        # Vyčisti název týmu (odstraň * a další přípony)
                         team_name = str(row.get(team_column, '')).replace('*', '').strip()
                         
                         if not team_name:
@@ -939,9 +1055,7 @@ class DatabaseManager:
                             stats_skipped += 1
                             continue
                         
-                        # Pro team stats používáme rok sezony k určení správné identity týmu
                         season = int(row['season'])
-                        # Převeď sezonu na přibližné datum (začátek sezony)
                         season_start_date = pd.to_datetime(f'{season-1}-10-01').date()
                         
                         team_id = self.get_team_id_for_date(team_name, season_start_date, conn)
@@ -950,7 +1064,7 @@ class DatabaseManager:
                             stats_skipped += 1
                             continue
                         
-                        # KOMPLEXNÍ team stats insert (se všemi dostupnými sloupci)
+                        # Comprehensive team stats SQL (unchanged)
                         stats_sql = """
                         INSERT INTO team_stats (
                             team_id, season, games_played, wins, losses, overtime_losses, points,
@@ -975,7 +1089,6 @@ class DatabaseManager:
                             points_percentage = EXCLUDED.points_percentage,
                             goals_for = EXCLUDED.goals_for,
                             goals_against = EXCLUDED.goals_against,
-                            -- Update všech komplexních stats
                             power_play_percentage = EXCLUDED.power_play_percentage,
                             penalty_kill_percentage = EXCLUDED.penalty_kill_percentage,
                             shot_percentage = EXCLUDED.shot_percentage,
@@ -1029,7 +1142,7 @@ class DatabaseManager:
                 logger.info(f"✅ Comprehensive team stats import completed:")
                 logger.info(f"  📊 Imported: {stats_imported} team stats (COMPREHENSIVE)")
                 logger.info(f"  ⚠️  Skipped: {stats_skipped} team stats")
-                logger.info(f"  📝 Source: {file_path.name}")
+                logger.info(f"  📁 Source: {file_path.name}")
                 
                 if return_teams:
                     return processed_teams
@@ -1038,17 +1151,16 @@ class DatabaseManager:
             logger.error(f"❌ Error importing team stats: {e}")
             return set() if return_teams else None
     
-    def import_standings_as_fallback(self, file_path, exclude_teams: Set = None):
-        """Import standings POUZE jako fallback pro týmy nepokryté komplexními stats"""
+    def import_standings_as_fallback(self, file_path: Path, exclude_teams: Set = None):
+        """Enhanced standings fallback import"""
         
         if exclude_teams is None:
             exclude_teams = set()
         
         try:
-            # Použij bezpečné čtení CSV
+            # === MIGRATION: Use safe file handlers ===
             df = read_csv(file_path)
             
-            # Detekuj sloupec s názvy týmů automaticky
             team_column = self.detect_team_name_column(df)
             
             standings_imported = 0
@@ -1062,7 +1174,6 @@ class DatabaseManager:
             with self.engine.connect() as conn:
                 for _, row in df.iterrows():
                     try:
-                        # Vyčisti název týmu (odstraň * a další přípony)
                         team_name = str(row.get(team_column, '')).replace('*', '').strip()
                         
                         if not team_name:
@@ -1077,13 +1188,13 @@ class DatabaseManager:
                             standings_skipped_missing += 1
                             continue
                         
-                        # Přeskoč pokud už je pokryto komplexními team stats
+                        # Skip if already covered
                         if (team_id, season) in exclude_teams:
                             standings_skipped_existing += 1
                             logger.debug(f"Skipping {team_name} {season} - already covered by team_stats")
                             continue
                         
-                        # Zkontroluj, zda team_stats záznam existuje (double-check)
+                        # Double-check for existing stats
                         existing_stats = conn.execute(text("""
                             SELECT id FROM team_stats WHERE team_id = :team_id AND season = :season
                         """), {'team_id': team_id, 'season': season}).fetchone()
@@ -1093,7 +1204,7 @@ class DatabaseManager:
                             logger.debug(f"Skipping {team_name} {season} - team_stats record exists")
                             continue
                         
-                        # Vytvoř ZÁKLADNÍ team_stats záznam ze standings (pouze omezené sloupce)
+                        # Create basic team_stats record (fallback)
                         fallback_sql = """
                         INSERT INTO team_stats (
                             team_id, season, games_played, wins, losses, overtime_losses, points,
@@ -1128,32 +1239,31 @@ class DatabaseManager:
                 conn.commit()
                 logger.info(f"✅ Standings fallback import completed:")
                 logger.info(f"  📊 Imported: {standings_imported} basic team stats (FALLBACK)")
-                logger.info(f"  ⭐️  Skipped (already covered): {standings_skipped_existing}")
+                logger.info(f"  ⭐  Skipped (already covered): {standings_skipped_existing}")
                 logger.info(f"  ⚠️  Skipped (missing teams): {standings_skipped_missing}")
-                logger.info(f"  📝 Source: {file_path.name}")
+                logger.info(f"  📁 Source: {file_path.name}")
                 
         except Exception as e:
             logger.error(f"❌ Error importing standings as fallback: {e}")
     
     def report_import_strategy_results(self):
-        """Report finálních výsledků import strategie"""
+        """Enhanced import strategy reporting"""
         
         try:
             with self.engine.connect() as conn:
-                # Počítej týmy s komplexními vs základními stats
                 comprehensive_count = conn.execute(text("""
                     SELECT COUNT(*) FROM team_stats 
-                    WHERE power_play_percentage IS NOT NULL  -- Indikátor komplexních dat
+                    WHERE power_play_percentage IS NOT NULL
                 """)).fetchone()[0]
                 
                 basic_count = conn.execute(text("""
                     SELECT COUNT(*) FROM team_stats 
-                    WHERE power_play_percentage IS NULL  -- Indikátor základních/fallback dat
+                    WHERE power_play_percentage IS NULL
                 """)).fetchone()[0]
                 
                 total_count = comprehensive_count + basic_count
                 
-                logger.info(f"\n📋 IMPORT STRATEGY RESULTS:")
+                logger.info(f"\n📋 ENHANCED IMPORT STRATEGY RESULTS:")
                 logger.info(f"  👑 Total team-season records: {total_count}")
                 logger.info(f"  📈 Comprehensive stats (from team_stats): {comprehensive_count}")
                 logger.info(f"  📊 Basic stats (from standings fallback): {basic_count}")
@@ -1162,7 +1272,6 @@ class DatabaseManager:
                     comprehensive_pct = (comprehensive_count / total_count) * 100
                     logger.info(f"  ✅ Data completeness: {comprehensive_pct:.1f}% comprehensive")
                 
-                # Zobraz týmy pouze s základními daty (pro debugging)
                 if basic_count > 0:
                     basic_teams = conn.execute(text("""
                         SELECT t.name, ts.season 
@@ -1183,107 +1292,11 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Error generating import strategy report: {e}")
     
-    def import_games_data(self, file_path):
-        """Import dat her se zjednodušeným zpracováním venue"""
-        
-        # Ověř integritu souboru nejdříve
-        if not self.verify_file_integrity(file_path):
-            logger.error(f"Skipping import of {file_path} due to integrity issues")
-            return
+    def import_odds_data(self, file_path: Path):
+        """Enhanced odds import s timezone conversion"""
         
         try:
-            # Použij bezpečné čtení CSV
-            df = read_csv(file_path)
-            games_imported = 0
-            games_skipped = 0
-            
-            logger.info(f"🎯 Starting import of {len(df)} games from {file_path.name}")
-            
-            with self.engine.connect() as conn:
-                for _, row in df.iterrows():
-                    try:
-                        # Získej team IDs pomocí date-aware lookup
-                        game_date = pd.to_datetime(row['date']).date()
-                        
-                        home_team_id = self.get_team_id_for_date(row['home_team'], game_date, conn)
-                        away_team_id = self.get_team_id_for_date(row['visitor_team'], game_date, conn)
-                        
-                        if not home_team_id or not away_team_id:
-                            logger.debug(f"Teams not found: {row['home_team']}, {row['visitor_team']} for {game_date}")
-                            games_skipped += 1
-                            continue
-                        
-                        # Zpracuj datetime - převeď na datetime objekt pokud je to string
-                        datetime_et = pd.to_datetime(row.get('datetime')) if pd.notna(row.get('datetime')) else None
-                        
-                        # Vlož hru (venue_id bude NULL prozatím, bude doplněno později)
-                        game_sql = """
-                        INSERT INTO games (date, datetime_et, season, league_id, home_team_id, away_team_id,
-                                         venue_id, home_score, away_score, overtime_shootout, status, data_source)
-                        VALUES (:date, :datetime_et, :season, 1, :home_team_id, :away_team_id,
-                               NULL, :home_score, :away_score, :overtime_shootout, :status, 'hockey-reference')
-                        ON CONFLICT (date, home_team_id, away_team_id) DO UPDATE SET
-                            datetime_et = EXCLUDED.datetime_et,
-                            home_score = EXCLUDED.home_score,
-                            away_score = EXCLUDED.away_score,
-                            status = EXCLUDED.status
-                        RETURNING id;
-                        """
-                        
-                        result = conn.execute(text(game_sql), {
-                            'date': game_date,
-                            'datetime_et': datetime_et,
-                            'season': int(row['season']),
-                            'home_team_id': home_team_id,
-                            'away_team_id': away_team_id,
-                            'home_score': int(row['home_score']) if pd.notna(row['home_score']) else None,
-                            'away_score': int(row['visitor_score']) if pd.notna(row['visitor_score']) else None,
-                            'overtime_shootout': row.get('overtime_shootout'),
-                            'status': row.get('status', 'completed')
-                        })
-                        
-                        game_row = result.fetchone()
-                        if game_row:
-                            game_id = game_row[0]
-                            
-                            # Vlož boxscore URL pokud je dostupná
-                            if pd.notna(row.get('boxscore_url')):
-                                url_sql = """
-                                INSERT INTO game_urls (game_id, url_type, url, source)
-                                VALUES (:game_id, 'boxscore', :url, 'hockey-reference')
-                                ON CONFLICT (game_id, url_type, source) DO NOTHING;
-                                """
-                                conn.execute(text(url_sql), {
-                                    'game_id': game_id,
-                                    'url': row['boxscore_url']
-                                })
-                        
-                        games_imported += 1
-                        
-                        # Progress logging každých 100 her
-                        if games_imported % 100 == 0:
-                            logger.info(f"  📈 Progress: {games_imported} games imported...")
-                        
-                    except Exception as e:
-                        logger.error(f"Error importing game row: {e}")
-                        games_skipped += 1
-                        continue
-                
-                conn.commit()
-                logger.info(f"✅ Games import completed:")
-                logger.info(f"  📊 Imported: {games_imported} games")
-                logger.info(f"  ⚠️  Skipped: {games_skipped} games")
-                logger.info(f"  📝 Source: {file_path.name}")
-                logger.info(f"  🏟️  Venue assignment: Will be added in future")
-                
-        except Exception as e:
-            logger.error(f"❌ Error importing games data: {e}")
-    
-    def import_odds_data(self, file_path):
-        """Import odds dat s timezone konverzí (CET→ET) a rozšířeným matchováním"""
-        
-        try:
-            # Použij bezpečné čtení CSV
+            # === MIGRATION: Use safe file handlers ===
             df = read_csv(file_path)
             odds_imported = 0
             odds_skipped_teams = 0
@@ -1295,18 +1308,16 @@ class DatabaseManager:
             with self.engine.connect() as conn:
                 for index, row in df.iterrows():
                     try:
-                        # Získej datum hry pro team lookup
                         match_datetime_str = row['match_datetime']
                         
-                        # Parsuj datetime z CSV (předpokládá CET/CEST timezone)
+                        # Parse datetime from CSV (assumes CET/CEST timezone)
                         match_datetime_cet = pd.to_datetime(match_datetime_str)
                         
-                        # Převeď z Central European Time na Eastern Time
+                        # Convert from Central European Time to Eastern Time
                         match_datetime_et = self.convert_cet_to_et(match_datetime_cet)
                         
                         game_date = match_datetime_et.date()
                         
-                        # Získej team IDs pomocí date-aware lookup
                         home_team_id = self.get_team_id_for_date(row['home_team'], game_date, conn)
                         away_team_id = self.get_team_id_for_date(row['away_team'], game_date, conn)
                         
@@ -1315,7 +1326,7 @@ class DatabaseManager:
                             odds_skipped_teams += 1
                             continue
                         
-                        # Najdi odpovídající hru s širším tolerance oknem
+                        # Find matching game with wider tolerance
                         game_id = self.find_matching_game(
                             conn, home_team_id, away_team_id, match_datetime_et
                         )
@@ -1325,16 +1336,15 @@ class DatabaseManager:
                             odds_skipped_games += 1
                             continue
                         
-                        # Vlož odds s timezone-opravenými datetimes
+                        # Insert odds with timezone-corrected datetimes
                         self.insert_odds_record(conn, row, game_id, match_datetime_et)
                         
-                        # Vlož betting URL
+                        # Insert betting URL
                         if pd.notna(row.get('source_url')):
                             self.insert_betting_url(conn, game_id, row['source_url'])
                         
                         odds_imported += 1
                         
-                        # Progress logging každých 50 záznamů
                         if odds_imported % 50 == 0:
                             logger.info(f"  📈 Progress: {odds_imported} odds imported...")
                         
@@ -1345,14 +1355,13 @@ class DatabaseManager:
                 
                 conn.commit()
                 
-                # Import summary
                 total_processed = odds_imported + odds_skipped_teams + odds_skipped_games
                 logger.info(f"✅ Odds import completed:")
                 logger.info(f"  📊 Processed: {total_processed} records")
                 logger.info(f"  💰 Imported: {odds_imported} odds")
                 logger.info(f"  ⚠️  Skipped (teams not found): {odds_skipped_teams}")
                 logger.info(f"  ⚠️  Skipped (games not matched): {odds_skipped_games}")
-                logger.info(f"  📝 Source: {file_path.name}")
+                logger.info(f"  📁 Source: {file_path.name}")
                 logger.info(f"  🌍 Timezone: CET/CEST → Eastern Time conversion applied")
                 
                 if odds_skipped_games > 0:
@@ -1360,35 +1369,30 @@ class DatabaseManager:
                 
         except Exception as e:
             logger.error(f"❌ Error importing odds data: {e}")
-
+    
     def convert_cet_to_et(self, cet_datetime):
-        """Převod Central European Time na Eastern Time"""
+        """Convert Central European Time to Eastern Time"""
         try:
             import pytz
             
-            # Definuj timezones
-            cet_tz = pytz.timezone('Europe/Prague')  # CET/CEST
-            et_tz = pytz.timezone('US/Eastern')      # EST/EDT
+            cet_tz = pytz.timezone('Europe/Prague')
+            et_tz = pytz.timezone('US/Eastern')
             
-            # Pokud je datetime naive, předpokládej že je v CET
             if cet_datetime.tzinfo is None:
                 cet_datetime = cet_tz.localize(cet_datetime)
             
-            # Převeď na Eastern Time
             et_datetime = cet_datetime.astimezone(et_tz)
             
-            # Vrať jako naive datetime (odpovídá uložení databáze)
             return et_datetime.replace(tzinfo=None)
             
         except Exception as e:
             logger.warning(f"Timezone conversion failed: {e}, using offset approximation")
-            # Fallback: jednoduchý 6-hodinový offset (CET je obvykle UTC+1, ET je UTC-5)
             return cet_datetime - pd.Timedelta(hours=6)
-
+    
     def find_matching_game(self, conn, home_team_id: int, away_team_id: int, match_datetime_et):
-        """Najdi odpovídající hru s rozšířenou tolerancí a více strategiemi matchování"""
+        """Find matching game with enhanced tolerance strategies"""
         
-        # Strategie 1: Přesný datetime match (±1 hodina)
+        # Strategy 1: Exact datetime match (±1 hour)
         game_sql_exact = """
         SELECT id, datetime_et, 
                ABS(EXTRACT(EPOCH FROM (datetime_et - :match_datetime))) as time_diff_seconds
@@ -1411,7 +1415,7 @@ class DatabaseManager:
             logger.debug(f"Found exact match: game_id={game_row[0]}, time_diff={game_row[2]:.0f}s")
             return game_row[0]
         
-        # Strategie 2: Stejné datum match (±12 hodin) 
+        # Strategy 2: Same date match (±12 hours) 
         game_sql_date = """
         SELECT id, datetime_et,
                ABS(EXTRACT(EPOCH FROM (datetime_et - :match_datetime))) as time_diff_seconds
@@ -1435,7 +1439,7 @@ class DatabaseManager:
             logger.debug(f"Found date match: game_id={game_row[0]}, time_diff={time_diff_hours:.1f}h")
             return game_row[0]
         
-        # Strategie 3: Pouze-datum match (ignoruj čas úplně)
+        # Strategy 3: Date-only match (ignore time completely)
         game_date = match_datetime_et.date()
         game_sql_dateonly = """
         SELECT id, datetime_et
@@ -1458,9 +1462,9 @@ class DatabaseManager:
             return game_row[0]
         
         return None
-
+    
     def insert_odds_record(self, conn, row, game_id: int, match_datetime_et):
-        """Vlož odds záznam s proper timezone zpracováním"""
+        """Insert odds record with proper timezone processing"""
         
         odds_sql = """
         INSERT INTO odds (game_id, bookmaker, market_type, home_odd, away_odd,
@@ -1476,7 +1480,7 @@ class DatabaseManager:
             away_opening_odd = EXCLUDED.away_opening_odd;
         """
         
-        # Převeď opening datetimes z CET na ET pokud existují
+        # Convert opening datetimes from CET to ET if they exist
         home_opening_datetime = None
         away_opening_datetime = None
         
@@ -1499,9 +1503,9 @@ class DatabaseManager:
             'home_opening_datetime': home_opening_datetime,
             'away_opening_datetime': away_opening_datetime
         })
-
+    
     def insert_betting_url(self, conn, game_id: int, source_url: str):
-        """Vlož betting URL pro hru"""
+        """Insert betting URL for game"""
         
         url_sql = """
         INSERT INTO game_urls (game_id, url_type, url, source)
@@ -1513,18 +1517,17 @@ class DatabaseManager:
             'game_id': game_id,
             'url': source_url
         })
-
+    
     def log_sample_unmatched_games(self, conn, sample_df):
-        """Zaloguj vzorek neodpovídajících her pro debugging"""
+        """Log sample unmatched games for debugging"""
         
-        logger.info("📝 Sample unmatched games (for debugging):")
+        logger.info("🔍 Sample unmatched games (for debugging):")
         
         for _, row in sample_df.iterrows():
             try:
                 match_datetime_cet = pd.to_datetime(row['match_datetime'])
                 match_datetime_et = self.convert_cet_to_et(match_datetime_cet)
                 
-                # Zkontroluj jaké hry existují pro tyto týmy okolo tohoto času
                 games_sql = """
                 SELECT date, datetime_et, home_score, away_score
                 FROM games g
@@ -1545,7 +1548,7 @@ class DatabaseManager:
                 
                 games = result.fetchall()
                 
-                logger.info(f"  📝 {row['home_team']} vs {row['away_team']}")
+                logger.info(f"  🔍 {row['home_team']} vs {row['away_team']}")
                 logger.info(f"     CET: {match_datetime_cet} → ET: {match_datetime_et}")
                 
                 if games:
@@ -1560,7 +1563,9 @@ class DatabaseManager:
                 continue
     
     def get_data_summary(self):
-        """Generuj komplexní souhrn dat s franchise info"""
+        """Enhanced data summary with performance tracking"""
+        
+        self.perf_logger.start_timer('data_summary_generation')
         
         try:
             with self.engine.connect() as conn:
@@ -1574,7 +1579,7 @@ class DatabaseManager:
                     ORDER BY season
                 """))
                 
-                logger.info("\n📊 GAMES SUMMARY:")
+                logger.info("\n📊 ENHANCED GAMES SUMMARY:")
                 for row in games_result:
                     logger.info(f"  Season {row[0]}: {row[1]} total games, {row[2]} completed ({row[3]} to {row[4]})")
                 
@@ -1588,7 +1593,7 @@ class DatabaseManager:
                 logger.info(f"  Games with venue assigned: {games_with_venues}/{total_games}")
                 logger.info(f"  Venue assignment: To be completed in future")
                 
-                # Franchises a teams summary
+                # Enhanced franchises and teams summary
                 franchise_result = conn.execute(text("""
                     SELECT COUNT(*) as total_franchises,
                            COUNT(CASE WHEN is_active = TRUE THEN 1 END) as active_franchises
@@ -1604,7 +1609,7 @@ class DatabaseManager:
                 """))
                 teams_data = teams_result.fetchone()
                 
-                logger.info(f"\n🏒 FRANCHISES & TEAMS:")
+                logger.info(f"\n🏒 ENHANCED FRANCHISES & TEAMS:")
                 logger.info(f"  {franchise_data[0]} total franchises ({franchise_data[1]} active)")
                 logger.info(f"  {teams_data[0]} total team identities ({teams_data[1]} current, {teams_data[2]} historical)")
                 
@@ -1620,7 +1625,7 @@ class DatabaseManager:
                 for row in history_result:
                     logger.info(f"  {row[0]}: {row[1]} changes")
                 
-                # Key franchise transitions
+                # Key franchise transitions (Utah/Arizona)
                 utah_history = conn.execute(text("""
                     SELECT 
                         t_from.name as from_name,
@@ -1638,14 +1643,14 @@ class DatabaseManager:
                 for row in utah_history:
                     logger.info(f"  {row[2]}: {row[0]} → {row[1]} ({row[3]})")
                 
-                # Odds summary
+                # Enhanced odds summary
                 odds_result = conn.execute(text("""
                     SELECT market_type, COUNT(*) as records, COUNT(DISTINCT bookmaker) as bookmakers
                     FROM odds 
                     GROUP BY market_type
                 """))
                 
-                logger.info("\n💰 ODDS SUMMARY:")
+                logger.info("\n💰 ENHANCED ODDS SUMMARY:")
                 for row in odds_result:
                     logger.info(f"  {row[0]}: {row[1]} records from {row[2]} bookmakers")
                 
@@ -1657,11 +1662,11 @@ class DatabaseManager:
                     ORDER BY url_type, source
                 """))
                 
-                logger.info("\n🔗 URLS SUMMARY:")
+                logger.info("\n🔗 ENHANCED URLS SUMMARY:")
                 for row in urls_result:
                     logger.info(f"  {row[0]} ({row[1]}): {row[2]} URLs")
                 
-                # Team stats summary by season
+                # Enhanced team stats summary
                 stats_result = conn.execute(text("""
                     SELECT season, COUNT(*) as teams_with_stats
                     FROM team_stats 
@@ -1669,43 +1674,64 @@ class DatabaseManager:
                     ORDER BY season
                 """))
                 
-                logger.info("\n📈 TEAM STATS SUMMARY:")
+                logger.info("\n📈 ENHANCED TEAM STATS SUMMARY:")
                 for row in stats_result:
                     logger.info(f"  Season {row[0]}: {row[1]} teams with stats")
+            
+            duration = self.perf_logger.end_timer('data_summary_generation')
+            logger.info(f"\n✅ Enhanced data summary completed in {duration:.3f}s")
                     
         except Exception as e:
-            logger.error(f"❌ Error generating summary: {e}")
+            self.perf_logger.end_timer('data_summary_generation')
+            logger.error(f"❌ Error generating enhanced summary: {e}")
 
 
-def main():
-    """Hlavní funkce s lepším error handlingem a setup adresářů"""
+def enhanced_main():
+    """Enhanced main function s comprehensive error handling a performance monitoring"""
     
-    # Zajisti existenci logs adresáře
+    # Ensure directories exist
     PATHS.ensure_directories()
     
-    logger.info("🏒 Starting NHL Database Setup with Hierarchical Import Strategy...")
-    logger.info(f"📂 Expected file locations:")
+    logger.info("🏒 Starting NHL Database Setup with ENHANCED INFRASTRUCTURE...")
+    logger.info("=" * 80)
+    logger.info("ENHANCED FEATURES:")
+    logger.info("  ✅ Per-component logging (database.log)")
+    logger.info("  ✅ Safe file handling with encoding detection")
+    logger.info("  ✅ Performance monitoring for all operations")
+    logger.info("  ✅ PATHS integration for all file operations")
+    logger.info("  ✅ Robust error handling with detailed logging")
+    logger.info("=" * 80)
+    
+    logger.info(f"📂 Enhanced file locations:")
     logger.info(f"  NHL Data: {PATHS.raw_data}")
     logger.info(f"  Odds Data: {PATHS.odds_data}")
+    logger.info(f"  Logs: {PATHS.logs}")
+    
+    # Performance logger for main function
+    main_perf_logger = PerformanceLogger(logger)
+    main_perf_logger.start_timer('total_setup')
     
     try:
-        # Inicializuj database manager
-        db_manager = DatabaseManager()
+        # Initialize enhanced database manager
+        logger.info("\n🔧 Initializing Enhanced DatabaseManager...")
+        main_perf_logger.start_timer('manager_initialization')
+        db_manager = EnhancedDatabaseManager()
+        main_perf_logger.end_timer('manager_initialization')
         
-        # Vytvoř tabulky
-        logger.info("\n🔧 Creating database tables...")
+        # Create tables
+        logger.info("\n🔧 Creating database tables with enhanced monitoring...")
         if not db_manager.create_tables():
             logger.error("❌ Failed to create tables. Please check permissions.")
             return
         
-        # Vlož počáteční data
+        # Insert initial data
         logger.info("\n🏒 Inserting initial leagues, franchises and teams...")
         if not db_manager.insert_initial_data():
             logger.error("❌ Failed to insert initial data.")
             return
         
-        # Import scraped data
-        logger.info("\n📊 Importing scraped NHL data with hierarchical strategy...")  
+        # Import scraped data with enhanced processing
+        logger.info("\n📊 Importing scraped NHL data with ENHANCED hierarchical strategy...")  
         if not db_manager.import_scraped_data():
             logger.error("❌ Failed to import scraped data.")
             logger.info(f"💡 Make sure your data files are in the correct directories:")
@@ -1713,29 +1739,41 @@ def main():
             logger.info(f"   • Odds data: {PATHS.odds_data}")
             return
         
-        # Zobraz souhrn
-        logger.info("\n📋 Generating data summary...")
+        # Generate enhanced summary
+        logger.info("\n📋 Generating enhanced data summary...")
         db_manager.get_data_summary()
         
+        total_duration = main_perf_logger.end_timer('total_setup')
+        
         logger.info("\n" + "="*80)
-        logger.info("🎉 Database setup completed successfully!")
-        logger.info("📋 Summary of refactoring improvements:")
-        logger.info("  ✅ Centralized path management (PATHS)")
-        logger.info("  ✅ Unified settings configuration")
-        logger.info("  ✅ Centralized logging with proper formatting")
-        logger.info("  ✅ Safe file reading with encoding detection")
-        logger.info("  ✅ Consistent error handling and reporting")
+        logger.info("🎉 ENHANCED Database setup completed successfully!")
+        logger.info(f"⏱️  Total setup time: {total_duration:.2f}s")
+        logger.info("\n📋 ENHANCED MIGRATION IMPROVEMENTS:")
+        logger.info("  ✅ Per-component logging (logs/database.log)")
+        logger.info("  ✅ Safe file handlers with automatic encoding detection")
+        logger.info("  ✅ Performance monitoring for all major operations")
+        logger.info("  ✅ PATHS integration replacing all hardcoded paths")
+        logger.info("  ✅ Enhanced error handling with detailed context")
+        logger.info("  ✅ Preserved all business logic and functionality")
+        logger.info("  ✅ UTF-8 encoding consistency throughout")
+        logger.info("  ✅ Robust file discovery and validation")
         logger.info("="*80)
         
     except Exception as e:
-        logger.error(f"❌ Database setup failed: {e}")
-        logger.info("\n💡 Troubleshooting tips:")
+        main_perf_logger.end_timer('total_setup')
+        logger.error(f"❌ Enhanced database setup failed: {e}")
+        
+        # Enhanced troubleshooting
+        logger.info("\n💡 ENHANCED TROUBLESHOOTING:")
         logger.info("  1. Check database connection settings")
         logger.info(f"  2. Ensure data files are in: {PATHS.raw_data} and {PATHS.odds_data}")
-        logger.info("  3. Verify file naming follows pattern: nhl_*_YYYYMMDD-HHMMSS.csv")
+        logger.info("  3. Verify file naming follows pattern: nhl_*_YYYYMMDD_HHMMSS.csv")
         logger.info("  4. Check database permissions and disk space")
+        logger.info(f"  5. Review component-specific logs in: {PATHS.logs}/database.log")
+        logger.info("  6. Verify encoding of CSV files (should be UTF-8 compatible)")
+        
         raise
 
 
 if __name__ == "__main__":
-    main()
+    enhanced_main()

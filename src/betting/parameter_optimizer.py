@@ -1,7 +1,16 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-Hockey Parameter Optimizer
+Hockey Parameter Optimizer (MIGRATED to Enhanced Infrastructure)
+==============================================================
 Comprehensive grid search optimization for backtesting parameters
+
+MIGRATION ENHANCEMENTS:
+- Per-component logging (logs/betting.log)
+- Centralized path management via PATHS
+- Safe file handling with automatic encoding detection
+- Performance monitoring for long-running operations
+- Clean imports without sys.path manipulation
 
 Features:
 - Multi-dimensional parameter grid search
@@ -15,9 +24,6 @@ Location: src/betting/parameter_optimizer.py
 
 import pandas as pd
 import numpy as np
-import os
-import logging
-import json
 from datetime import datetime
 from typing import Dict, List, Tuple, Any, Optional
 from itertools import product
@@ -29,46 +35,65 @@ import warnings
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore')
 
-# Import backtesting engine
-import sys
-current_dir = os.path.dirname(os.path.abspath(__file__))
-if current_dir not in sys.path:
-    sys.path.insert(0, current_dir)
-
-from backtesting_engine import BacktestingEngine
-
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('logs/parameter_optimization.log', encoding='utf-8'),
-        logging.StreamHandler()
-    ]
+# === MIGRATION: Enhanced infrastructure imports ===
+from config.paths import PATHS
+from config.logging_config import setup_logging, get_component_logger, PerformanceLogger
+from src.utils.file_handlers import (
+    write_json, write_csv, read_json,
+    FileHandler
 )
-logger = logging.getLogger(__name__)
+
+# === MIGRATION: Setup enhanced logging (component-specific) ===
+# Setup pouze jednou pro celou aplikaci
+setup_logging(
+    log_level='INFO',
+    log_to_file=True,
+    component_files=True  # Per-component log files
+)
+
+# Component-specific logger pro betting operations
+logger = get_component_logger(__name__, 'betting')
+
+# === MIGRATION: Clean import of backtesting engine ===
+try:
+    from src.betting.backtesting_engine import BacktestingEngine
+except ImportError:
+    # Fallback pro compatibility
+    try:
+        from backtesting_engine import BacktestingEngine
+    except ImportError as e:
+        logger.error(f"Cannot import BacktestingEngine: {e}")
+        raise ImportError("BacktestingEngine not available. Please ensure it exists in src/betting/")
+
 
 class ParameterOptimizer:
     """
     Comprehensive Parameter Optimization for Hockey Backtesting
     
-    Performs grid search across multiple parameter dimensions to find
-    optimal betting strategy configurations
+    ENHANCED with:
+    - Centralized path management
+    - Component-specific logging
+    - Performance monitoring
+    - Safe file handling
     """
     
     def __init__(self, 
-                 elo_model_path: str = 'models/elo_model_trained_2024.pkl',
+                 elo_model_name: str = 'elo_model_trained_2024',
+                 elo_model_type: str = 'pkl',
                  initial_bankroll: float = 10000.0,
                  n_workers: Optional[int] = None):
         """
         Initialize Parameter Optimizer
         
         Args:
-            elo_model_path: Path to trained Elo model
+            elo_model_name: Name of trained Elo model (without extension)
+            elo_model_type: Model file type (pkl, joblib, etc.)
             initial_bankroll: Starting bankroll for each simulation
             n_workers: Number of parallel workers (None = auto-detect)
         """
-        self.elo_model_path = elo_model_path
+        # === MIGRATION: Store model parameters for BacktestingEngine ===
+        self.elo_model_name = elo_model_name
+        self.elo_model_type = elo_model_type
         self.initial_bankroll = initial_bankroll
         self.n_workers = n_workers or max(1, mp.cpu_count() - 1)
         
@@ -79,9 +104,12 @@ class ParameterOptimizer:
         # Default parameter grids
         self.parameter_grids = self._define_default_grids()
         
-        logger.info(f"🔧 ParameterOptimizer initialized")
+        # === MIGRATION: Performance monitoring ===
+        self.perf_logger = PerformanceLogger(logger)
+        
+        logger.info("Parameter Optimizer initialized (Enhanced)")
         logger.info(f"   Workers: {self.n_workers}")
-        logger.info(f"   Model: {elo_model_path}")
+        logger.info(f"   Model: {elo_model_name}.{elo_model_type}")
         logger.info(f"   Bankroll: €{initial_bankroll:,.0f}")
         
     def _define_default_grids(self) -> Dict[str, List]:
@@ -108,7 +136,7 @@ class ParameterOptimizer:
             parameter_grids: Dictionary defining parameter ranges
         """
         self.parameter_grids.update(parameter_grids)
-        logger.info("✅ Custom parameter grids set")
+        logger.info("Custom parameter grids set")
     
     def generate_parameter_combinations(self, 
                                       quick_test: bool = False,
@@ -179,7 +207,7 @@ class ParameterOptimizer:
                                         'max_stake_pct': max_stake
                                     })
         
-        logger.info(f"📊 Generated {len(combinations)} parameter combinations")
+        logger.info(f"Generated {len(combinations)} parameter combinations")
         return combinations
     
     def run_single_backtest(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -195,7 +223,8 @@ class ParameterOptimizer:
         try:
             # Initialize fresh engine for each test
             engine = BacktestingEngine(
-                elo_model_path=self.elo_model_path,
+                elo_model_name=self.elo_model_name,
+                elo_model_type=self.elo_model_type,
                 initial_bankroll=self.initial_bankroll
             )
             
@@ -241,7 +270,7 @@ class ParameterOptimizer:
             return result_summary
             
         except Exception as e:
-            logger.error(f"❌ Backtest failed for params {params}: {e}")
+            logger.error(f"Backtest failed for params {params}: {e}")
             return {
                 'parameters': params.copy(),
                 'error': str(e),
@@ -264,9 +293,12 @@ class ParameterOptimizer:
         Returns:
             Optimization results and best strategies
         """
-        logger.info(f"🚀 Starting parameter optimization ({search_type} search)")
+        logger.info(f"Starting parameter optimization ({search_type} search)")
         logger.info(f"   Target: {optimization_target}")
         logger.info(f"   Min bets threshold: {min_bets_threshold}")
+        
+        # === MIGRATION: Performance tracking ===
+        self.perf_logger.start_timer('parameter_optimization')
         
         # Generate parameter combinations
         if search_type == 'quick':
@@ -277,11 +309,15 @@ class ParameterOptimizer:
             combinations = self.generate_parameter_combinations()
         
         total_combinations = len(combinations)
-        logger.info(f"📊 Running {total_combinations} backtests on {self.n_workers} workers...")
+        logger.info(f"Running {total_combinations} backtests on {self.n_workers} workers...")
         
         # Run parallel optimization
         self.optimization_results = []
         completed_count = 0
+        
+        # Performance tracking for parallel processing
+        parallel_timer_name = 'parallel_backtesting'
+        self.perf_logger.start_timer(parallel_timer_name)
         
         # Use ProcessPoolExecutor for true parallelism
         with ProcessPoolExecutor(max_workers=self.n_workers) as executor:
@@ -302,13 +338,16 @@ class ParameterOptimizer:
                     # Progress logging
                     if completed_count % max(1, total_combinations // 10) == 0:
                         progress_pct = (completed_count / total_combinations) * 100
-                        logger.info(f"📈 Progress: {completed_count}/{total_combinations} ({progress_pct:.1f}%)")
+                        logger.info(f"Progress: {completed_count}/{total_combinations} ({progress_pct:.1f}%)")
                         
                 except Exception as e:
-                    logger.error(f"❌ Future execution failed: {e}")
+                    logger.error(f"Future execution failed: {e}")
                     completed_count += 1
         
-        logger.info(f"✅ Optimization completed! {len(self.optimization_results)} results collected")
+        # End performance tracking
+        self.perf_logger.end_timer(parallel_timer_name)
+        
+        logger.info(f"Optimization completed! {len(self.optimization_results)} results collected")
         
         # Filter valid results (minimum bets threshold)
         valid_results = [
@@ -317,10 +356,10 @@ class ParameterOptimizer:
             and 'error' not in result
         ]
         
-        logger.info(f"📊 Valid strategies: {len(valid_results)}/{len(self.optimization_results)}")
+        logger.info(f"Valid strategies: {len(valid_results)}/{len(self.optimization_results)}")
         
         if not valid_results:
-            logger.warning("⚠️ No valid strategies found!")
+            logger.warning("No valid strategies found!")
             return {'best_strategies': {}, 'optimization_results': self.optimization_results}
         
         # Find best strategies by different criteria
@@ -328,6 +367,9 @@ class ParameterOptimizer:
         
         # Generate comprehensive analysis
         analysis = self._generate_optimization_analysis(valid_results)
+        
+        # End total performance tracking
+        self.perf_logger.end_timer('parameter_optimization')
         
         return {
             'best_strategies': self.best_strategies,
@@ -342,47 +384,6 @@ class ParameterOptimizer:
             }
         }
     
-    def _find_best_strategies(self, 
-                            valid_results: List[Dict], 
-                            primary_target: str) -> Dict[str, Dict]:
-        """Find best strategies by multiple criteria"""
-        
-        if not valid_results:
-            return {}
-        
-        results_df = pd.DataFrame([
-            {**result['parameters'], **result['performance'], **result['statistics']}
-            for result in valid_results
-        ])
-        
-        best_strategies = {}
-        
-        # Best by ROI
-        best_roi_idx = results_df['roi'].idxmax()
-        best_strategies['best_roi'] = {
-            'strategy': valid_results[best_roi_idx],
-            'rank_by': 'roi',
-            'value': results_df.loc[best_roi_idx, 'roi']
-        }
-        
-        # Best by Sharpe Ratio
-        if results_df['sharpe_ratio'].notna().any():
-            best_sharpe_idx = results_df['sharpe_ratio'].idxmax()
-            best_strategies['best_sharpe'] = {
-                'strategy': valid_results[best_sharpe_idx],
-                'rank_by': 'sharpe_ratio',
-                'value': results_df.loc[best_sharpe_idx, 'sharpe_ratio']
-            }
-        
-        # Best by Risk-Adjusted Return (ROI / Max Drawdown)
-        results_df['risk_adjusted_return'] = results_df['roi'] / (results_df['max_drawdown'] + 0.01)
-        best_risk_adj_idx = results_df['risk_adjusted_return'].idxmax()
-        best_strategies['best_risk_adjusted'] = {
-            'strategy': valid_results[best_risk_adj_idx],
-            'rank_by': 'risk_adjusted_return',
-            'value': results_df.loc[best_risk_adj_idx, 'risk_adjusted_return']
-        }
-        
     def _find_best_strategies(self, 
                             valid_results: List[Dict], 
                             primary_target: str) -> Dict[str, Dict]:
@@ -463,24 +464,7 @@ class ParameterOptimizer:
                 'value': results_df.loc[primary_idx, primary_target]
             }
         
-        logger.info(f"🏆 Found {len(best_strategies)} best strategy categories")
-        return best_strategies
-        
-        # Primary target strategy
-        if primary_target != 'roi' and primary_target in results_df.columns:
-            if primary_target == 'sharpe':
-                primary_target = 'sharpe_ratio'
-            elif primary_target == 'risk_adjusted':
-                primary_target = 'risk_adjusted_return'
-            
-            primary_idx = results_df[primary_target].idxmax()
-            best_strategies['primary_target'] = {
-                'strategy': valid_results[primary_idx],
-                'rank_by': primary_target,
-                'value': results_df.loc[primary_idx, primary_target]
-            }
-        
-        logger.info(f"🏆 Found {len(best_strategies)} best strategy categories")
+        logger.info(f"Found {len(best_strategies)} best strategy categories")
         return best_strategies
     
     def _generate_optimization_analysis(self, valid_results: List[Dict]) -> Dict[str, Any]:
@@ -557,31 +541,37 @@ class ParameterOptimizer:
     
     def save_optimization_results(self, 
                                 results: Dict[str, Any],
-                                output_dir: str = 'models/experiments',
                                 filename_prefix: str = 'parameter_optimization') -> str:
         """
-        Save optimization results to files
+        Save optimization results to files using enhanced file handlers
         
         Args:
             results: Optimization results dictionary
-            output_dir: Output directory
             filename_prefix: Prefix for output files
             
         Returns:
             Path to main results file
         """
-        os.makedirs(output_dir, exist_ok=True)
+        # === MIGRATION: Use PATHS for output directory ===
+        output_dir = PATHS.experiments
+        output_dir.mkdir(parents=True, exist_ok=True)
         
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         
+        # === MIGRATION: Use enhanced file handlers ===
         # Main results (JSON)
-        main_file = os.path.join(output_dir, f'{filename_prefix}_results_{timestamp}.json')
+        main_filename = f'{filename_prefix}_results_{timestamp}.json'
+        main_file = output_dir / main_filename
         
         # Convert for JSON serialization
         json_results = self._convert_for_json(results)
         
-        with open(main_file, 'w', encoding='utf-8') as f:
-            json.dump(json_results, f, indent=2, default=str)
+        try:
+            write_json(json_results, main_file)
+            logger.info(f"Main results saved to: {main_file}")
+        except Exception as e:
+            logger.error(f"Failed to save main results: {e}")
+            raise
         
         # Detailed results (CSV)
         if results.get('optimization_results'):
@@ -592,9 +582,15 @@ class ParameterOptimizer:
                     csv_data.append(row)
             
             if csv_data:
-                csv_file = os.path.join(output_dir, f'{filename_prefix}_detailed_{timestamp}.csv')
-                csv_df = pd.DataFrame(csv_data)
-                csv_df.to_csv(csv_file, index=False, encoding='utf-8')
+                csv_filename = f'{filename_prefix}_detailed_{timestamp}.csv'
+                csv_file = output_dir / csv_filename
+                
+                try:
+                    csv_df = pd.DataFrame(csv_data)
+                    write_csv(csv_df, csv_file, index=False)
+                    logger.info(f"Detailed CSV saved to: {csv_file}")
+                except Exception as e:
+                    logger.error(f"Failed to save detailed CSV: {e}")
         
         # Best strategies summary (CSV)
         if results.get('best_strategies'):
@@ -611,12 +607,18 @@ class ParameterOptimizer:
                 }
                 best_strategies_data.append(row)
             
-            best_file = os.path.join(output_dir, f'{filename_prefix}_best_{timestamp}.csv')
-            best_df = pd.DataFrame(best_strategies_data)
-            best_df.to_csv(best_file, index=False, encoding='utf-8')
+            best_filename = f'{filename_prefix}_best_{timestamp}.csv'
+            best_file = output_dir / best_filename
+            
+            try:
+                best_df = pd.DataFrame(best_strategies_data)
+                write_csv(best_df, best_file, index=False)
+                logger.info(f"Best strategies CSV saved to: {best_file}")
+            except Exception as e:
+                logger.error(f"Failed to save best strategies CSV: {e}")
         
-        logger.info(f"💾 Optimization results saved to {main_file}")
-        return main_file
+        logger.info(f"Optimization results saved successfully")
+        return str(main_file)
     
     def _convert_for_json(self, obj):
         """Convert objects to JSON-serializable format"""
@@ -650,7 +652,7 @@ class ParameterOptimizer:
             return "No optimization results available."
         
         report_lines = []
-        report_lines.append("🏒 HOCKEY BETTING PARAMETER OPTIMIZATION REPORT")
+        report_lines.append("HOCKEY BETTING PARAMETER OPTIMIZATION REPORT")
         report_lines.append("=" * 60)
         
         # Summary statistics
@@ -660,7 +662,7 @@ class ParameterOptimizer:
         report_lines.append(f"Optimization target: {summary.get('optimization_target', 'N/A')}")
         
         # Best strategies
-        report_lines.append("\n🏆 BEST STRATEGIES BY CATEGORY:")
+        report_lines.append("\nBEST STRATEGIES BY CATEGORY:")
         report_lines.append("-" * 40)
         
         for category, strategy_info in results['best_strategies'].items():
@@ -669,7 +671,7 @@ class ParameterOptimizer:
             perf = strategy['performance']
             stats = strategy['statistics']
             
-            report_lines.append(f"\n📊 {category.upper().replace('_', ' ')}:")
+            report_lines.append(f"\n{category.upper().replace('_', ' ')}:")
             report_lines.append(f"   ROI: {perf['roi']:+.2%}")
             report_lines.append(f"   Max Drawdown: {perf['max_drawdown']:.2%}")
             report_lines.append(f"   Total Bets: {stats['total_bets']:,}")
@@ -685,7 +687,7 @@ class ParameterOptimizer:
         analysis = results.get('analysis', {})
         if analysis and 'performance_statistics' in analysis:
             perf_stats = analysis['performance_statistics']
-            report_lines.append(f"\n📈 OVERALL PERFORMANCE ANALYSIS:")
+            report_lines.append(f"\nOVERALL PERFORMANCE ANALYSIS:")
             report_lines.append("-" * 40)
             report_lines.append(f"Average ROI: {perf_stats['roi']['mean']:+.2%}")
             report_lines.append(f"ROI Range: {perf_stats['roi']['min']:+.2%} to {perf_stats['roi']['max']:+.2%}")
@@ -695,23 +697,33 @@ class ParameterOptimizer:
         return "\n".join(report_lines)
 
 
-def run_quick_optimization(search_type: str = 'quick', 
-                          optimization_target: str = 'roi',
-                          min_bets_threshold: int = 20):
+def run_optimization(search_type: str = 'quick', 
+                    optimization_target: str = 'roi',
+                    min_bets_threshold: int = 20,
+                    elo_model_name: str = 'elo_model_trained_2024',
+                    elo_model_type: str = 'pkl') -> Dict[str, Any]:
     """
-    Optimization test function with flexible parameters
+    Enhanced optimization function with flexible parameters
     
     Args:
         search_type: 'quick', 'focused', or 'comprehensive'
         optimization_target: 'roi', 'sharpe', 'risk_adjusted', or 'profit'
         min_bets_threshold: Minimum number of bets for valid strategy
+        elo_model_name: Name of Elo model to use (without extension)
+        elo_model_type: Model file type (pkl, joblib, etc.)
+    
+    Returns:
+        Optimization results dictionary
     """
-    logger.info(f"🚀 Running {search_type} parameter optimization...")
+    logger.info(f"Starting {search_type} parameter optimization...")
     logger.info(f"   Target: {optimization_target}")
     logger.info(f"   Min bets: {min_bets_threshold}")
+    logger.info(f"   Model: {elo_model_name}.{elo_model_type}")
     
+    # === MIGRATION: Enhanced initialization ===
     optimizer = ParameterOptimizer(
-        elo_model_path='models/elo_model_trained_2024.pkl',
+        elo_model_name=elo_model_name,
+        elo_model_type=elo_model_type,
         initial_bankroll=10000.0
     )
     
@@ -732,28 +744,28 @@ def run_quick_optimization(search_type: str = 'quick',
     summary_report = optimizer.generate_summary_report(results)
     print("\n" + summary_report)
     
-    logger.info(f"✅ {search_type.title()} optimization ({optimization_target}) completed!")
-    logger.info(f"📁 Results saved to {output_file}")
+    logger.info(f"{search_type.title()} optimization ({optimization_target}) completed!")
+    logger.info(f"Results saved to {output_file}")
     return results
 
 
 if __name__ == "__main__":
+    # === MIGRATION: Enhanced main execution ===
     
-    # Create logs directory
-    os.makedirs('logs', exist_ok=True)
+    # Easy configuration parameters
+    SEARCH_TYPE = 'quick'               # 'quick', 'focused', 'comprehensive'
+    OPTIMIZATION_TARGET = 'roi'         # Options:
+                                        #   'roi' - maximize return on investment
+                                        #   'sharpe' - maximize risk-adjusted returns (Sharpe ratio)
+                                        #   'risk_adjusted' - maximize ROI/drawdown ratio
+                                        #   'profit' - maximize absolute profit
+    MIN_BETS = 20                       # Minimum bets threshold for valid strategy
+    ELO_MODEL_NAME = 'elo_model_trained_2024'  # Model name without extension
     
-    # 🎯 EASY CONFIGURATION - Change these parameters:
-    SEARCH_TYPE = 'comprehensive'           # 'quick', 'focused', 'comprehensive'
-    OPTIMIZATION_TARGET = 'roi'     # Options:
-                                    #   'roi' - maximize return on investment
-                                    #   'sharpe' - maximize risk-adjusted returns (Sharpe ratio)
-                                    #   'risk_adjusted' - maximize ROI/drawdown ratio
-                                    #   'profit' - maximize absolute profit
-    MIN_BETS = 20                   # Minimum bets threshold for valid strategy
-    
-    # Run optimization
-    results = run_quick_optimization(
+    # Run optimization with enhanced infrastructure
+    results = run_optimization(
         search_type=SEARCH_TYPE,
         optimization_target=OPTIMIZATION_TARGET,
-        min_bets_threshold=MIN_BETS
+        min_bets_threshold=MIN_BETS,
+        elo_model_name=ELO_MODEL_NAME
     )
