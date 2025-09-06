@@ -14,9 +14,8 @@ import os
 import sys
 import warnings
 from pathlib import Path
-from typing import Optional, Dict, Any
-import logging
 from typing import Optional, Dict, Any, TYPE_CHECKING
+import logging
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -45,7 +44,7 @@ def setup_notebook_environment(
         dict: Slovník s konfigurací prostředí
         
     Usage:
-        # V prvním buňce notebooku:
+        # V první buňce notebooku:
         from src.utils.notebook_helper import setup_notebook_environment
         env = setup_notebook_environment()
         PATHS = env['PATHS']
@@ -407,7 +406,6 @@ def create_performance_tracker(logger: 'logging.Logger') -> 'PerformanceLogger':
         return SimpleTimer(logger)
 
 
-# === Enhanced all-in-one setup function ===
 def notebook_setup_complete(
     project_root: Optional[str] = None,
     import_libraries: bool = True,
@@ -429,7 +427,7 @@ def notebook_setup_complete(
         dict: Kompletní enhanced prostředí pro notebook
         
     Usage:
-        # V prvním buňce notebooku:
+        # V první buňce notebooku:
         from src.utils.notebook_helper import notebook_setup_complete
         env = notebook_setup_complete(sample_data='games', component='analysis')
         
@@ -482,148 +480,6 @@ def notebook_setup_complete(
         print(f"Available in 'env': {list(env.keys())}")
         print(f"Logger component: {component}")
         print("Enhanced file handling and performance tracking ready.")
-    
-    return env
-
-
-def load_sample_data(data_type: str = "games", limit: int = 1000) -> 'pd.DataFrame':
-    """
-    Načte vzorková data pro rychlé testování.
-    
-    Args:
-        data_type: Typ dat ('games', 'odds', etc.)
-        limit: Počet řádků k načtení
-        
-    Returns:
-        pd.DataFrame: Načtená data
-        
-    Usage:
-        from src.utils.notebook_helper import load_sample_data
-        games = load_sample_data('games', limit=500)
-    """
-    import pandas as pd
-    
-    try:
-        from config.paths import PATHS
-        data_file = PATHS.get_data_file(data_type, latest=True)
-        
-        # Načti data s limitem
-        df = pd.read_csv(data_file, nrows=limit)
-        print(f"✅ Loaded {len(df)} rows from {data_file.name}")
-        return df
-        
-    except Exception as e:
-        print(f"❌ Failed to load {data_type} data: {e}")
-        # Return empty DataFrame s očekávanou strukturou
-        if data_type == 'games':
-            return pd.DataFrame(columns=['date', 'home_team', 'away_team', 'home_score', 'away_score'])
-        else:
-            return pd.DataFrame()
-
-
-def export_notebook_results(
-    data: 'pd.DataFrame', 
-    filename: str, 
-    export_type: str = "csv"
-) -> Path:
-    """
-    Exportuje výsledky z notebooku do správného adresáře.
-    
-    Args:
-        data: DataFrame k exportu
-        filename: Název souboru (bez přípony)
-        export_type: Typ exportu (csv, excel, parquet)
-        
-    Returns:
-        Path: Cesta k exportovanému souboru
-        
-    Usage:
-        results_path = export_notebook_results(df, "analysis_results", "csv")
-    """
-    from datetime import datetime
-    try:
-        from config.paths import PATHS
-        
-        # Add timestamp to filename
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename_with_timestamp = f"{filename}_{timestamp}"
-        
-        # Choose export path based on type
-        if export_type.lower() == "csv":
-            file_path = PATHS.processed_data / f"{filename_with_timestamp}.csv"
-            data.to_csv(file_path, index=False, encoding='utf-8')
-        elif export_type.lower() in ["excel", "xlsx"]:
-            file_path = PATHS.processed_data / f"{filename_with_timestamp}.xlsx"
-            data.to_excel(file_path, index=False)
-        elif export_type.lower() == "parquet":
-            file_path = PATHS.processed_data / f"{filename_with_timestamp}.parquet"
-            data.to_parquet(file_path, index=False)
-        else:
-            raise ValueError(f"Unsupported export type: {export_type}")
-        
-        print(f"✅ Exported to: {file_path}")
-        return file_path
-        
-    except Exception as e:
-        print(f"❌ Export failed: {e}")
-        # Fallback to current directory
-        fallback_path = Path(f"{filename}.{export_type}")
-        if export_type.lower() == "csv":
-            data.to_csv(fallback_path, index=False, encoding='utf-8')
-        print(f"⚠️ Exported to fallback location: {fallback_path}")
-        return fallback_path
-
-
-# === All-in-one setup function ===
-def notebook_setup_complete(
-    project_root: Optional[str] = None,
-    import_libraries: bool = True,
-    sample_data: Optional[str] = None,
-    quiet: bool = False
-) -> Dict[str, Any]:
-    """
-    Kompletní setup pro notebook - paths, libraries, sample data.
-    
-    Args:
-        project_root: Cesta k root adresáři
-        import_libraries: Zda importovat běžné knihovny
-        sample_data: Typ vzorových dat k načtení
-        quiet: Potlačí výstupní zprávy
-        
-    Returns:
-        dict: Kompletní prostředí pro notebook
-        
-    Usage:
-        # V prvním buňce notebooku:
-        from src.utils.notebook_helper import notebook_setup_complete
-        env = notebook_setup_complete(sample_data='games')
-        
-        # Použití:
-        PATHS = env['PATHS']
-        pd = env['pd']
-        plt = env['plt']
-        games_df = env['sample_data']
-    """
-    # Setup environment
-    env = setup_notebook_environment(project_root, quiet)
-    
-    # Import libraries
-    if import_libraries:
-        libs = import_common_libraries()
-        env.update(libs)
-    
-    # Load sample data
-    if sample_data:
-        try:
-            sample_df = load_sample_data(sample_data, limit=1000)
-            env['sample_data'] = sample_df
-        except Exception as e:
-            if not quiet:
-                print(f"⚠️ Could not load sample data: {e}")
-    
-    if not quiet:
-        print("\n🎯 Complete notebook setup ready!")
-        print(f"Available in 'env': {list(env.keys())}")
     
     return env
 
