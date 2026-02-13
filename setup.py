@@ -121,28 +121,9 @@ setup(
         ]
     },
     
-    # === Entry points ===
-    entry_points={
-        "console_scripts": [
-            # Main prediction commands
-            "hockey-predict=src.models.prediction_runner:main",
-            "hockey-backtest=src.betting.backtesting_runner:main",
-            "hockey-train=src.models.model_trainer:main",
-            
-            # Data collection commands
-            "hockey-scrape=src.data.data_scraper:main",
-            "hockey-update=src.data.data_updater:main",
-            
-            # Database management
-            "hockey-db-setup=src.database.database_setup:main",
-            "hockey-db-migrate=src.database.migrations:main",
-            
-            # Utility commands
-            "hockey-validate=src.utils.model_validator:main",
-            "hockey-export=src.utils.data_exporter:main",
-        ]
-    },
-    
+    # Entry points removed — referenced modules do not exist yet.
+    # Re-add when CLI runners are implemented.
+
     # === Classification ===
     classifiers=[
         "Development Status :: 4 - Beta",

@@ -12,10 +12,12 @@ Umístění: src/utils/file_handlers.py
 import pandas as pd
 import json
 import pickle
+import io
 from pathlib import Path
-from typing import Any, List, Optional, Union
+from typing import Any, List, Optional, Set, Union
 import chardet
 import csv
+import numpy as np
 
 # === MIGRACE: Centralized imports ===
 from config.paths import PATHS
@@ -23,6 +25,29 @@ from config.logging_config import get_component_logger
 
 # === MIGRACE: Component-specific logger pro utils ===
 logger = get_component_logger(__name__, 'utils')
+
+
+# Bezpečná deserializace pickle — omezení na povolené moduly/třídy
+_PICKLE_ALLOWED_MODULES: Set[str] = {
+    'numpy', 'numpy.core', 'numpy.core.multiarray',
+    'pandas', 'pandas.core', 'pandas.core.frame', 'pandas.core.series',
+    'sklearn', 'xgboost', 'lightgbm', 'collections', 'builtins',
+    'copy_reg', 'copyreg', '_codecs',
+}
+
+
+class _RestrictedUnpickler(pickle.Unpickler):
+    """Unpickler omezený na bezpečné moduly pro ML modely."""
+
+    def find_class(self, module: str, name: str):
+        # Povol moduly, které začínají povoleným prefixem
+        top_module = module.split('.')[0]
+        if top_module in _PICKLE_ALLOWED_MODULES or module in _PICKLE_ALLOWED_MODULES:
+            return super().find_class(module, name)
+        raise pickle.UnpicklingError(
+            f"Pickle deserialization blocked: {module}.{name} "
+            f"is not in the allowed modules list"
+        )
 
 
 class FileHandler:
@@ -267,9 +292,12 @@ class FileHandler:
         
         try:
             with open(filepath, 'rb') as f:
-                obj = pickle.load(f)
+                obj = _RestrictedUnpickler(f).load()
             logger.info(f"Successfully loaded pickle from {filepath.name}")
             return obj
+        except pickle.UnpicklingError as e:
+            logger.error(f"Pickle security check failed for {filepath}: {e}")
+            raise
         except Exception as e:
             logger.error(f"Failed to load pickle from {filepath}: {e}")
             raise

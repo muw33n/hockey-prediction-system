@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Hockey Prediction System - Database Setup (ENHANCED MIGRATED)
-==============================================================
-Database setup s enhanced infrastructure: per-component logging,
-safe file handling, centralized paths a performance monitoring.
+Hockey Prediction System - Database Setup (REFACTORED)
+=======================================================
+Database setup with enhanced infrastructure and SRP refactoring.
+
+REFACTORING: SRP-based refactoring
+- SQL DDL moved to src/database/schema.sql
+- Team mapping moved to src/database/team_mapper.py
+- DatabaseConnectionManager imported from src/database/connection.py
 
 Umístění: src/database/database_setup.py
-
-MIGRATION NOTES:
-- Enhanced per-component logging (database.log)
-- Safe file handlers s automatic encoding detection  
-- Performance monitoring pro kritické operace
-- PATHS integration for all file operations
-- Robust error handling s detailed logging
 """
 
 import pandas as pd
@@ -25,11 +22,11 @@ import re
 from typing import List, Dict, Optional, Set
 from pathlib import Path
 
-# === ENHANCED MIGRATION: Centralized imports ===
+# === Enhanced infrastructure imports ===
 from config.paths import PATHS
 from config.logging_config import (
-    setup_logging, 
-    get_component_logger, 
+    setup_logging,
+    get_component_logger,
     PerformanceLogger
 )
 from src.utils.file_handlers import (
@@ -38,11 +35,23 @@ from src.utils.file_handlers import (
     FileHandler
 )
 
-# === ENHANCED MIGRATION: Setup per-component logging ===
+# === REFACTORING: Import from extracted modules ===
+from src.database.team_mapper import (
+    NHL_FRANCHISES,
+    NHL_CURRENT_TEAMS,
+    NHL_ARIZONA_HISTORY,
+    normalize_team_name,
+    resolve_jets_name,
+    get_franchise_mapping,
+    get_team_column_candidates,
+    get_nhl_team_indicators
+)
+
+# === Setup per-component logging ===
 setup_logging(
     log_level='INFO',
     log_to_file=True,
-    component_files=True  # Key: per-component log files
+    component_files=True
 )
 
 # Component-specific logger for database operations
@@ -84,13 +93,7 @@ class EnhancedDatabaseManager:
         
         # Enhanced startup logging
         self.log_enhanced_startup()
-        
-        # Team name mapping (unchanged, business logic preserved)
-        self.team_name_mapping = {
-            'Arizona Coyotes': 'Utah Mammoth',
-            'Utah Hockey Club': 'Utah Mammoth'
-        }
-        
+
         logger.info("🎯 Enhanced DatabaseManager initialized successfully")
         logger.info(f"   Database: {self._get_db_info()}")
         logger.info(f"   NHL Data: {self.data_paths['nhl_data']}")
@@ -539,41 +542,8 @@ class EnhancedDatabaseManager:
                     result = conn.execute(text("SELECT id FROM leagues WHERE name = 'NHL'"))
                     nhl_league_id = result.fetchone()[0]
                 
-                # Insert franchises (business logic unchanged)
-                franchises_data = [
-                    (1, 'Boston Bruins Franchise', '1924-11-01', 'Boston'),
-                    (2, 'Buffalo Sabres Franchise', '1970-05-12', 'Buffalo'),
-                    (3, 'Detroit Red Wings Franchise', '1926-05-15', 'Detroit'),
-                    (4, 'Florida Panthers Franchise', '1993-06-14', 'Miami'),
-                    (5, 'Montreal Canadiens Franchise', '1909-12-04', 'Montreal'),
-                    (6, 'Ottawa Senators Franchise', '1992-12-16', 'Ottawa'),
-                    (7, 'Tampa Bay Lightning Franchise', '1992-12-16', 'Tampa Bay'),
-                    (8, 'Toronto Maple Leafs Franchise', '1917-11-26', 'Toronto'),
-                    (9, 'Carolina Hurricanes Franchise', '1979-06-22', 'Hartford'),
-                    (10, 'Columbus Blue Jackets Franchise', '2000-06-25', 'Columbus'),
-                    (11, 'New Jersey Devils Franchise', '1974-06-11', 'Kansas City'),
-                    (12, 'New York Islanders Franchise', '1972-11-08', 'Uniondale'),
-                    (13, 'New York Rangers Franchise', '1926-05-15', 'New York'),
-                    (14, 'Philadelphia Flyers Franchise', '1967-06-05', 'Philadelphia'),
-                    (15, 'Pittsburgh Penguins Franchise', '1967-06-05', 'Pittsburgh'),
-                    (16, 'Washington Capitals Franchise', '1974-06-11', 'Washington'),
-                    (17, 'Chicago Blackhawks Franchise', '1926-05-15', 'Chicago'),
-                    (18, 'Colorado Avalanche Franchise', '1979-06-22', 'Quebec City'),
-                    (19, 'Dallas Stars Franchise', '1967-06-05', 'Minneapolis'),
-                    (20, 'Minnesota Wild Franchise', '2000-06-25', 'Saint Paul'),
-                    (21, 'Nashville Predators Franchise', '1998-06-25', 'Nashville'),
-                    (22, 'St. Louis Blues Franchise', '1967-06-05', 'St. Louis'),
-                    (23, 'Arizona/Utah Franchise', '1979-06-22', 'Winnipeg'),
-                    (24, 'Winnipeg Jets Franchise', '1999-06-25', 'Atlanta'),
-                    (25, 'Anaheim Ducks Franchise', '1993-06-15', 'Anaheim'),
-                    (26, 'Calgary Flames Franchise', '1972-06-06', 'Atlanta'),
-                    (27, 'Edmonton Oilers Franchise', '1979-06-22', 'Edmonton'),
-                    (28, 'Los Angeles Kings Franchise', '1967-06-05', 'Los Angeles'),
-                    (29, 'San Jose Sharks Franchise', '1991-05-09', 'San Jose'),
-                    (30, 'Seattle Kraken Franchise', '2021-07-21', 'Seattle'),
-                    (31, 'Vancouver Canucks Franchise', '1970-05-12', 'Vancouver'),
-                    (32, 'Vegas Golden Knights Franchise', '2017-06-22', 'Las Vegas'),
-                ]
+                # Insert franchises (data from team_mapper module)
+                franchises_data = NHL_FRANCHISES
                 
                 franchises_inserted = 0
                 for franchise_id, name, founded_date, founded_city in franchises_data:
@@ -590,41 +560,8 @@ class EnhancedDatabaseManager:
                     })
                     franchises_inserted += 1
                 
-                # Insert current teams (business logic unchanged)
-                current_teams = [
-                    (1, 'Boston Bruins', 'Boston', 'Eastern', 'Atlantic', 'BOS', '1924-11-01'),
-                    (2, 'Buffalo Sabres', 'Buffalo', 'Eastern', 'Atlantic', 'BUF', '1970-05-12'),
-                    (3, 'Detroit Red Wings', 'Detroit', 'Eastern', 'Atlantic', 'DET', '1932-10-05'),
-                    (4, 'Florida Panthers', 'Sunrise', 'Eastern', 'Atlantic', 'FLA', '1993-10-06'),
-                    (5, 'Montreal Canadiens', 'Montreal', 'Eastern', 'Atlantic', 'MTL', '1917-11-26'),
-                    (6, 'Ottawa Senators', 'Ottawa', 'Eastern', 'Atlantic', 'OTT', '1992-10-08'),
-                    (7, 'Tampa Bay Lightning', 'Tampa Bay', 'Eastern', 'Atlantic', 'TBL', '1992-10-07'),
-                    (8, 'Toronto Maple Leafs', 'Toronto', 'Eastern', 'Atlantic', 'TOR', '1927-02-17'),
-                    (9, 'Carolina Hurricanes', 'Raleigh', 'Eastern', 'Metropolitan', 'CAR', '1997-10-29'),
-                    (10, 'Columbus Blue Jackets', 'Columbus', 'Eastern', 'Metropolitan', 'CBJ', '2000-10-07'),
-                    (11, 'New Jersey Devils', 'Newark', 'Eastern', 'Metropolitan', 'NJD', '1982-10-05'),
-                    (12, 'New York Islanders', 'Elmont', 'Eastern', 'Metropolitan', 'NYI', '1972-10-07'),
-                    (13, 'New York Rangers', 'New York', 'Eastern', 'Metropolitan', 'NYR', '1926-11-16'),
-                    (14, 'Philadelphia Flyers', 'Philadelphia', 'Eastern', 'Metropolitan', 'PHI', '1967-10-11'),
-                    (15, 'Pittsburgh Penguins', 'Pittsburgh', 'Eastern', 'Metropolitan', 'PIT', '1967-10-11'),
-                    (16, 'Washington Capitals', 'Washington', 'Eastern', 'Metropolitan', 'WSH', '1974-10-09'),
-                    (17, 'Chicago Blackhawks', 'Chicago', 'Western', 'Central', 'CHI', '1926-11-17'),
-                    (18, 'Colorado Avalanche', 'Denver', 'Western', 'Central', 'COL', '1995-10-06'),
-                    (19, 'Dallas Stars', 'Dallas', 'Western', 'Central', 'DAL', '1993-10-05'),
-                    (20, 'Minnesota Wild', 'Saint Paul', 'Western', 'Central', 'MIN', '2000-10-06'),
-                    (21, 'Nashville Predators', 'Nashville', 'Western', 'Central', 'NSH', '1998-10-10'),
-                    (22, 'St. Louis Blues', 'St. Louis', 'Western', 'Central', 'STL', '1967-10-11'),
-                    (23, 'Utah Mammoth', 'Salt Lake City', 'Western', 'Central', 'UTA', '2024-04-18'),
-                    (24, 'Winnipeg Jets', 'Winnipeg', 'Western', 'Central', 'WPG', '2011-10-09'),
-                    (25, 'Anaheim Ducks', 'Anaheim', 'Western', 'Pacific', 'ANA', '1993-10-08'),
-                    (26, 'Calgary Flames', 'Calgary', 'Western', 'Pacific', 'CGY', '1980-10-09'),
-                    (27, 'Edmonton Oilers', 'Edmonton', 'Western', 'Pacific', 'EDM', '1979-10-10'),
-                    (28, 'Los Angeles Kings', 'Los Angeles', 'Western', 'Pacific', 'LAK', '1967-10-14'),
-                    (29, 'San Jose Sharks', 'San Jose', 'Western', 'Pacific', 'SJS', '1991-10-04'),
-                    (30, 'Seattle Kraken', 'Seattle', 'Western', 'Pacific', 'SEA', '2021-10-12'),
-                    (31, 'Vancouver Canucks', 'Vancouver', 'Western', 'Pacific', 'VAN', '1970-10-09'),
-                    (32, 'Vegas Golden Knights', 'Las Vegas', 'Western', 'Pacific', 'VGK', '2017-10-06'),
-                ]
+                # Insert current teams (data from team_mapper module)
+                current_teams = NHL_CURRENT_TEAMS
                 
                 teams_inserted = 0
                 for franchise_id, name, city, conference, division, abbrev, effective_from in current_teams:
@@ -651,12 +588,8 @@ class EnhancedDatabaseManager:
                     except Exception as e:
                         logger.warning(f"Failed to insert team {name}: {e}")
                 
-                # Insert historical Arizona/Utah transitions
-                historical_arizona_teams = [
-                    (23, 'Winnipeg Jets', 'Winnipeg', 'Western', 'Smythe', 'WPG', '1979-10-10', '1996-04-13'),
-                    (23, 'Phoenix Coyotes', 'Phoenix', 'Western', 'Pacific', 'PHX', '1996-04-13', '2014-06-27'),
-                    (23, 'Arizona Coyotes', 'Glendale', 'Western', 'Pacific', 'ARI', '2014-06-27', '2024-04-18'),
-                ]
+                # Insert historical Arizona/Utah transitions (data from team_mapper module)
+                historical_arizona_teams = NHL_ARIZONA_HISTORY
                 
                 for franchise_id, name, city, conference, division, abbrev, effective_from, effective_to in historical_arizona_teams:
                     team_sql = """
@@ -692,46 +625,48 @@ class EnhancedDatabaseManager:
             return False
     
     def detect_team_name_column(self, df: pd.DataFrame) -> str:
-        """Enhanced team column detection (unchanged business logic)"""
-        team_column_candidates = [
-            'Team', '', ':', 'team', 'Team Name', 'Tm'
-        ]
-        
+        """
+        Enhanced team column detection.
+        Uses candidates and indicators from team_mapper module.
+        """
+        team_column_candidates = get_team_column_candidates()
+
         for col_name in team_column_candidates:
             if col_name in df.columns:
                 sample_values = df[col_name].dropna().astype(str).str.strip()
                 sample_values = sample_values[sample_values != '']
-                
+
                 if len(sample_values) > 0:
                     first_value = sample_values.iloc[0]
                     if len(first_value) > 2 and not first_value.isdigit():
                         logger.info(f"🎯 Detected team name column: '{col_name}'")
                         logger.info(f"   Sample values: {list(sample_values.head(3))}")
                         return col_name
-        
+
         # Fallback detection
         logger.warning("⚠️ Standard team name columns not found, attempting auto-detection...")
-        
+
+        nhl_indicators = get_nhl_team_indicators()
+
         for col_name in df.columns:
             if df[col_name].dtype == 'object':
                 sample_values = df[col_name].dropna().astype(str).str.strip()
                 sample_values = sample_values[sample_values != '']
-                
+
                 if len(sample_values) > 0:
                     first_value = sample_values.iloc[0]
-                    nhl_indicators = ['Bruins', 'Rangers', 'Kings', 'Wings', 'Leafs', 'Flames', 'Stars', 'Wild']
                     if any(indicator in first_value for indicator in nhl_indicators):
                         logger.info(f"🎯 Auto-detected team name column: '{col_name}'")
                         logger.info(f"   Sample values: {list(sample_values.head(3))}")
                         return col_name
-        
+
         # Final fallback
         string_columns = df.select_dtypes(include=['object']).columns.tolist()
         if string_columns:
             fallback_col = string_columns[0]
             logger.warning(f"⚠️ Using fallback column: '{fallback_col}'")
             return fallback_col
-        
+
         raise ValueError("❌ Could not detect team name column in CSV")
     
     def get_team_id_for_date(self, team_name: str, game_date: str, conn) -> Optional[int]:
@@ -768,42 +703,27 @@ class EnhancedDatabaseManager:
         if historical_team:
             return historical_team[0]
         
-        # Try franchise mapping
-        franchise_mapping = {
-            'Arizona Coyotes': 'Utah Mammoth',
-            'Utah Hockey Club': 'Utah Mammoth',
-            'Phoenix Coyotes': 'Utah Mammoth',
-            'Winnipeg Jets': self._resolve_jets_name(game_date),
-        }
-        
-        if normalized_name in franchise_mapping:
-            mapped_name = franchise_mapping[normalized_name]
+        # Try franchise mapping (using team_mapper module)
+        mapped_name = get_franchise_mapping(normalized_name, game_date)
+        if mapped_name:
             return self.get_team_id_for_date(mapped_name, game_date, conn)
         
         logger.debug(f"Team not found: {team_name} (normalized: {normalized_name}) for date {game_date}")
         return None
     
     def _resolve_jets_name(self, game_date) -> str:
-        """Resolve Jets franchise (business logic unchanged)"""
-        cutoff_date = pd.to_datetime('2011-05-31').date()
-        if isinstance(game_date, str):
-            game_date = pd.to_datetime(game_date).date()
-        
-        if game_date <= cutoff_date:
-            return 'Utah Mammoth'
-        else:
-            return 'Winnipeg Jets'
+        """
+        Resolve Jets franchise.
+        Delegates to team_mapper module.
+        """
+        return resolve_jets_name(game_date)
     
     def normalize_team_name(self, team_name: str) -> str:
-        """Enhanced team name normalization"""
-        team_name = team_name.strip()
-        
-        basic_mappings = {
-            'Utah Hockey Club': 'Utah Mammoth',
-            'Arizona Coyotes': 'Utah Mammoth',
-        }
-        
-        return basic_mappings.get(team_name, team_name)
+        """
+        Enhanced team name normalization.
+        Delegates to team_mapper module.
+        """
+        return normalize_team_name(team_name)
     
     def find_latest_data_files(self, base_name: str, limit: int = 1) -> List[Path]:
         """Enhanced file discovery s PATHS integration"""

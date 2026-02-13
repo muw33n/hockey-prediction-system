@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Hockey Backtesting Engine - Enhanced Infrastructure (MIGRATED)
-============================================================
+Hockey Backtesting Engine (REFACTORED)
+======================================
 Dynamic Elo-based value betting simulation with comprehensive analysis.
 
-Enhanced Features:
-- Per-component logging (logs/betting.log)
-- Centralized path management with PATHS
-- Safe file handling with automatic encoding detection
-- Performance monitoring for critical operations
-- Robust error handling with detailed logging
+REFACTORING: SRP-based refactoring
+- Pure EV functions delegated to src/betting/ev_calculations.py
+- JSON conversion delegated to src/utils/json_helpers.py
 
 Location: src/betting/backtesting_engine.py
 """
@@ -25,13 +22,22 @@ from typing import Dict, List, Tuple, Optional, Any
 from collections import defaultdict
 import warnings
 
-# === MIGRACE: Enhanced infrastructure imports ===
+# === Enhanced infrastructure imports ===
 from config.paths import PATHS
 from config.logging_config import get_component_logger, setup_logging, PerformanceLogger
 from src.utils.file_handlers import (
     read_csv, write_csv, read_json, write_json,
     load_model_safe, save_model_safe, FileHandler
 )
+
+# === REFACTORING: Import pure EV functions ===
+from src.betting.ev_calculations import (
+    calculate_ev_variants as _calculate_ev_variants,
+    calculate_stake_size as _calculate_stake_size
+)
+
+# === REFACTORING: Import JSON helpers ===
+from src.utils.json_helpers import convert_for_json, convert_key_for_json
 
 # Load environment variables
 load_dotenv()
@@ -199,10 +205,9 @@ class BacktestingEngine:
         logger.info(f"Loading backtesting data for season {season}...")
         
         try:
-            # === SQL queries zůstávají stejné (already well-structured) ===
-            # Load games data
-            games_query = f"""
-            SELECT 
+            # Load games data (parametrizované dotazy proti SQL injection)
+            games_query = text("""
+            SELECT
                 g.id,
                 g.date,
                 g.datetime_et,
@@ -213,30 +218,30 @@ class BacktestingEngine:
                 g.away_score,
                 g.overtime_shootout,
                 g.status,
-                
+
                 -- Current team names
                 ht.name as home_team_name,
                 at.name as away_team_name
-                
+
             FROM games g
             JOIN teams ht ON g.home_team_id = ht.id AND ht.is_current = TRUE
             JOIN teams at ON g.away_team_id = at.id AND at.is_current = TRUE
-            
-            WHERE g.season = '{season}'
+
+            WHERE g.season = :season
                 AND g.status = 'completed'
-                AND g.home_score IS NOT NULL 
+                AND g.home_score IS NOT NULL
                 AND g.away_score IS NOT NULL
             ORDER BY g.date, g.datetime_et, g.id
-            """
-            
-            self.games_df = pd.read_sql(games_query, self.engine)
+            """)
+
+            self.games_df = pd.read_sql(games_query, self.engine, params={"season": season})
             
             if self.games_df.empty:
                 raise ValueError(f"No completed games found for season {season}")
             
             # Load odds data
-            odds_query = f"""
-            SELECT 
+            odds_query = text("""
+            SELECT
                 o.game_id,
                 o.bookmaker,
                 o.market_type,
@@ -245,18 +250,18 @@ class BacktestingEngine:
                 o.home_opening_odd,
                 o.away_opening_odd,
                 g.date as game_date
-                
+
             FROM odds o
             JOIN games g ON o.game_id = g.id
-            
-            WHERE g.season = '{season}'
+
+            WHERE g.season = :season
                 AND o.market_type = 'moneyline_2way'
-                AND o.home_odd IS NOT NULL 
+                AND o.home_odd IS NOT NULL
                 AND o.away_odd IS NOT NULL
             ORDER BY g.date, o.game_id, o.bookmaker
-            """
-            
-            self.odds_df = pd.read_sql(odds_query, self.engine)
+            """)
+
+            self.odds_df = pd.read_sql(odds_query, self.engine, params={"season": season})
             
             # Group games by gaming days
             self.games_df['game_date'] = pd.to_datetime(self.games_df['date']).dt.date
@@ -291,48 +296,16 @@ class BacktestingEngine:
         finally:
             self.perf_logger.end_timer('data_loading')
     
-    def calculate_ev_variants(self, 
-                            model_prob: float, 
+    def calculate_ev_variants(self,
+                            model_prob: float,
                             bookmaker_odds: float,
                             confidence: Optional[float] = None,
                             max_kelly: float = 0.25) -> Dict[str, float]:
         """
-        Calculate multiple Expected Value variants
-        
-        Args:
-            model_prob: Model's predicted probability
-            bookmaker_odds: Bookmaker's decimal odds
-            confidence: Model confidence (0-1), calculated if None
-            max_kelly: Maximum Kelly fraction cap
-            
-        Returns:
-            Dictionary with EV calculations
+        Calculate multiple Expected Value variants.
+        Delegates to pure function in ev_calculations.py.
         """
-        if confidence is None:
-            confidence = abs(model_prob - 0.5) * 2  # 0-1 scale
-        
-        # Basic Expected Value
-        basic_ev = (model_prob * bookmaker_odds) - 1
-        
-        # Kelly-enhanced EV
-        if bookmaker_odds > 1.0:
-            kelly_fraction = (bookmaker_odds * model_prob - 1) / (bookmaker_odds - 1)
-            kelly_fraction = max(0, min(kelly_fraction, max_kelly))
-            kelly_enhanced_ev = basic_ev * kelly_fraction if kelly_fraction > 0 else 0
-        else:
-            kelly_enhanced_ev = 0
-            kelly_fraction = 0
-        
-        # Confidence-weighted EV
-        confidence_weighted_ev = basic_ev * (0.5 + 0.5 * confidence)
-        
-        return {
-            'basic_ev': basic_ev,
-            'kelly_enhanced_ev': kelly_enhanced_ev,
-            'confidence_weighted_ev': confidence_weighted_ev,
-            'kelly_fraction': kelly_fraction,
-            'confidence': confidence
-        }
+        return _calculate_ev_variants(model_prob, bookmaker_odds, confidence, max_kelly)
     
     def get_best_odds(self, game_id: int) -> Dict[str, Any]:
         """
@@ -375,7 +348,7 @@ class BacktestingEngine:
             'avg_away_odd': game_odds['away_odd'].mean()
         }
     
-    def calculate_stake_size(self, 
+    def calculate_stake_size(self,
                            ev_value: float,
                            odds: float,
                            model_prob: float,
@@ -383,51 +356,13 @@ class BacktestingEngine:
                            stake_size: float = 0.02,
                            max_stake_pct: float = 0.10) -> float:
         """
-        Calculate stake size based on specified method
-        
-        Args:
-            ev_value: Expected value of the bet
-            odds: Bookmaker odds
-            model_prob: Model's predicted probability
-            stake_method: 'fixed', 'kelly', or 'hybrid'
-            stake_size: Fixed percentage or Kelly multiplier
-            max_stake_pct: Maximum stake as percentage of bankroll
-            
-        Returns:
-            Stake amount in currency units
+        Calculate stake size based on specified method.
+        Delegates to pure function in ev_calculations.py.
         """
-        if ev_value <= 0:
-            return 0.0
-        
-        if stake_method == 'fixed':
-            stake_amount = self.current_bankroll * stake_size
-            
-        elif stake_method == 'kelly':
-            if odds > 1.0:
-                kelly_fraction = (odds * model_prob - 1) / (odds - 1)
-                kelly_fraction = max(0, kelly_fraction * stake_size)  # stake_size as Kelly multiplier
-                stake_amount = self.current_bankroll * kelly_fraction
-            else:
-                stake_amount = 0.0
-                
-        elif stake_method == 'hybrid':
-            # Combine fixed base with Kelly adjustment
-            base_stake = self.current_bankroll * (stake_size * 0.5)
-            kelly_fraction = (odds * model_prob - 1) / (odds - 1) if odds > 1.0 else 0
-            kelly_adjustment = self.current_bankroll * kelly_fraction * (stake_size * 0.5)
-            stake_amount = base_stake + max(0, kelly_adjustment)
-        else:
-            raise ValueError(f"Unknown stake method: {stake_method}")
-        
-        # Apply maximum stake limit
-        max_stake = self.current_bankroll * max_stake_pct
-        stake_amount = min(stake_amount, max_stake)
-        
-        # Minimum stake (avoid micro bets)
-        min_stake = 1.0  # €1 minimum
-        stake_amount = max(stake_amount, min_stake) if stake_amount > 0 else 0.0
-        
-        return round(stake_amount, 2)
+        return _calculate_stake_size(
+            ev_value, odds, model_prob, self.current_bankroll,
+            stake_method, stake_size, max_stake_pct
+        )
     
     def process_gaming_day(self, 
                           day_date: date, 
@@ -935,40 +870,18 @@ class BacktestingEngine:
             self.perf_logger.end_timer('results_saving')
     
     def _convert_for_json(self, obj):
-        """Convert numpy types and pandas objects to JSON-serializable types"""
-        if isinstance(obj, dict):
-            # Convert keys and values
-            return {self._convert_key_for_json(key): self._convert_for_json(value) 
-                   for key, value in obj.items()}
-        elif isinstance(obj, list):
-            return [self._convert_for_json(item) for item in obj]
-        elif isinstance(obj, (np.integer, np.int64)):
-            return int(obj)
-        elif isinstance(obj, (np.floating, np.float64)):
-            return float(obj)
-        elif isinstance(obj, np.ndarray):
-            return obj.tolist()
-        elif isinstance(obj, (date, datetime)):
-            return obj.isoformat()
-        elif hasattr(obj, 'to_timestamp'):  # pandas Period
-            return str(obj)
-        elif hasattr(obj, 'isoformat'):  # Other datetime-like objects
-            return obj.isoformat()
-        else:
-            return obj
-    
+        """
+        Convert numpy types and pandas objects to JSON-serializable types.
+        Delegates to json_helpers module.
+        """
+        return convert_for_json(obj)
+
     def _convert_key_for_json(self, key):
-        """Convert dictionary keys to JSON-serializable format"""
-        if isinstance(key, str):
-            return key
-        elif isinstance(key, (int, float, bool)):
-            return key
-        elif hasattr(key, 'to_timestamp'):  # pandas Period
-            return str(key)
-        elif isinstance(key, (date, datetime)):
-            return key.isoformat()
-        else:
-            return str(key)
+        """
+        Convert dictionary keys to JSON-serializable format.
+        Delegates to json_helpers module.
+        """
+        return convert_key_for_json(key)
 
 
 # === Enhanced example usage and testing ===

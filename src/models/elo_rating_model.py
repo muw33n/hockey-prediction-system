@@ -1,28 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Hockey Prediction System - Elo Rating Model (ENHANCED MIGRATED)
-================================================================
+Hockey Prediction System - Elo Rating Model (REFACTORED)
+=========================================================
 Implementuje dynamický Elo rating systém pro NHL týmy.
 Upraveno pro franchise-based databázové schéma s trénink/backtesting rozdělením.
 
-MIGRACE: Enhanced infrastructure s per-component logging, performance monitoring,
-safe file handling a robust error handling.
+REFACTORING: SRP-based refactoring
+- DatabaseConnectionManager moved to src/database/connection.py
+- Pure Elo functions delegated to src/models/elo_calculations.py
 
 Umístění: src/models/elo_rating_model.py
 """
 
 import pandas as pd
 import numpy as np
-from sqlalchemy import create_engine
-from sqlalchemy.exc import SQLAlchemyError, OperationalError, DisconnectionError
+from sqlalchemy import text
 from datetime import datetime, date
 from typing import Dict, Tuple, List, Optional
-import json
-import time
-import traceback
 
-# === MIGRACE: Enhanced infrastructure imports ===
+# === Enhanced infrastructure imports ===
 from config.paths import PATHS
 from config.settings import settings
 from config.logging_config import (
@@ -34,86 +31,19 @@ from src.utils.file_handlers import (
     save_processed_data
 )
 
-# === MIGRACE: Component-specific logger pro models ===
+# === REFACTORING: Import shared DatabaseConnectionManager ===
+from src.database.connection import DatabaseConnectionManager
+
+# === REFACTORING: Import pure Elo calculation functions ===
+from src.models.elo_calculations import (
+    expected_score as _expected_score,
+    game_result_to_score as _game_result_to_score,
+    calculate_rating_update,
+    apply_season_regression
+)
+
+# === Component-specific logger pro models ===
 logger = get_component_logger(__name__, 'models')
-
-
-class DatabaseConnectionManager:
-    """Enhanced database connection s retry logic a error handling"""
-    
-    def __init__(self, connection_string: str, max_retries: int = 3, retry_delay: float = 1.0):
-        self.connection_string = connection_string
-        self.max_retries = max_retries
-        self.retry_delay = retry_delay
-        self._engine = None
-    
-    @property
-    def engine(self):
-        """Lazy connection s retry logic"""
-        if self._engine is None:
-            self._connect_with_retry()
-        return self._engine
-    
-    def _connect_with_retry(self):
-        """Pokus o připojení s retry logic"""
-        for attempt in range(self.max_retries):
-            try:
-                logger.info(f"Database connection attempt {attempt + 1}/{self.max_retries}")
-                self._engine = create_engine(
-                    self.connection_string,
-                    pool_pre_ping=True,  # Test connections before use
-                    pool_recycle=3600,   # Recycle connections every hour
-                    connect_args={"connect_timeout": 30}
-                )
-                # Test connection
-                with self._engine.connect() as conn:
-                    from sqlalchemy import text
-                    conn.execute(text("SELECT 1"))
-                logger.info("Database connection established successfully")
-                return
-                
-            except Exception as e:
-                logger.error(f"Database connection attempt {attempt + 1} failed: {e}")
-                if attempt < self.max_retries - 1:
-                    logger.info(f"Retrying in {self.retry_delay} seconds...")
-                    time.sleep(self.retry_delay)
-                    self.retry_delay *= 1.5  # Exponential backoff
-                else:
-                    logger.error("All database connection attempts failed")
-                    raise
-    
-    def execute_query_safe(self, query: str, description: str = "Query") -> pd.DataFrame:
-        """Safe query execution s retry logic a performance monitoring"""
-        for attempt in range(self.max_retries):
-            try:
-                start_time = time.time()
-                logger.debug(f"Executing {description}")
-                
-                df = pd.read_sql(query, self.engine)
-                
-                execution_time = time.time() - start_time
-                                
-                # Smart logging: INFO for important/slow queries, DEBUG for routine ones
-                if execution_time > 0.5 or len(df) > 1000 or 'historical' in description.lower():
-                    logger.info(f"{description} completed: {len(df)} rows in {execution_time:.2f}s")
-                else:
-                    logger.debug(f"{description} completed: {len(df)} rows in {execution_time:.3f}s")
-                
-                return df
-                
-            except (OperationalError, DisconnectionError) as e:
-                logger.warning(f"{description} failed (attempt {attempt + 1}): {e}")
-                if attempt < self.max_retries - 1:
-                    logger.info("Reconnecting to database...")
-                    self._engine = None  # Force reconnection
-                    time.sleep(self.retry_delay)
-                else:
-                    logger.error(f"{description} failed after {self.max_retries} attempts")
-                    raise
-            except Exception as e:
-                logger.error(f"{description} failed with unexpected error: {e}")
-                LoggingConfig.log_exception(logger, e, description)
-                raise
 
 
 class EloRatingSystem:
@@ -168,86 +98,40 @@ class EloRatingSystem:
     
     def expected_score(self, rating_a: float, rating_b: float, home_advantage: float = 0) -> float:
         """
-        Vypočítá očekávané skóre pro tým A proti týmu B
-        
-        Args:
-            rating_a: Elo rating týmu A
-            rating_b: Elo rating týmu B
-            home_advantage: Dodatečný rating pro domácí tým
-            
-        Returns:
-            Očekávaná pravděpodobnost výhry týmu A (0-1)
+        Vypočítá očekávané skóre pro tým A proti týmu B.
+        Delegates to pure function in elo_calculations.py.
         """
-        adjusted_rating_a = rating_a + home_advantage
-        rating_diff = adjusted_rating_a - rating_b
-        
-        # Standardní Elo formule
-        expected = 1 / (1 + 10 ** (-rating_diff / 400))
-        return expected
+        return _expected_score(rating_a, rating_b, home_advantage)
     
-    def update_ratings(self, team_a_id: int, team_b_id: int, actual_score: float, 
+    def update_ratings(self, team_a_id: int, team_b_id: int, actual_score: float,
                       home_advantage: float = 0, k_multiplier: float = 1.0) -> Tuple[float, float]:
         """
-        Aktualizuje Elo ratings po zápase
-        
-        Args:
-            team_a_id: ID domácího týmu
-            team_b_id: ID hostujícího týmu
-            actual_score: 1 pokud tým A vyhrál, 0 pokud tým B vyhrál, 0.5 pro OT/SO porážku
-            home_advantage: Bonus pro domácí výhodu
-            k_multiplier: Násobitel pro K-factor (pro playoff zápasy, atd.)
-            
-        Returns:
-            Tuple (new_rating_a, new_rating_b)
+        Aktualizuje Elo ratings po zápase.
+        Delegates calculation to pure function in elo_calculations.py.
         """
         # Získej aktuální ratings
         rating_a = self.team_ratings.get(team_a_id, self.initial_rating)
         rating_b = self.team_ratings.get(team_b_id, self.initial_rating)
-        
-        # Vypočítaj očekávané skóre
-        expected_a = self.expected_score(rating_a, rating_b, home_advantage)
-        expected_b = 1 - expected_a
-        
-        # Vypočítaj změny ratingu
-        k_factor = self.k_factor * k_multiplier
-        change_a = k_factor * (actual_score - expected_a)
-        change_b = k_factor * ((1 - actual_score) - expected_b)
-        
+
+        # Použij pure funkci pro výpočet
+        new_rating_a, new_rating_b = calculate_rating_update(
+            rating_a, rating_b, actual_score, self.k_factor,
+            home_advantage, k_multiplier
+        )
+
         # Aktualizuj ratings
-        new_rating_a = rating_a + change_a
-        new_rating_b = rating_b + change_b
-        
         self.team_ratings[team_a_id] = new_rating_a
         self.team_ratings[team_b_id] = new_rating_b
-        
+
         return new_rating_a, new_rating_b
     
-    def game_result_to_score(self, home_score: int, away_score: int, 
+    def game_result_to_score(self, home_score: int, away_score: int,
                            overtime_shootout: str = '') -> Tuple[float, str]:
         """
-        Převede výsledek zápasu na Elo skóre formát
-        
-        Args:
-            home_score: Finální skóre domácího týmu
-            away_score: Finální skóre hostujícího týmu
-            overtime_shootout: 'OT', 'SO', nebo prázdný string
-            
-        Returns:
-            Tuple (home_team_score, result_type)
-            home_team_score: 1.0 výhra, 0.0 porážka, 0.6 OT/SO výhra, 0.4 OT/SO porážka
+        Převede výsledek zápasu na Elo skóre formát.
+        Delegates to pure function in elo_calculations.py.
         """
-        if home_score > away_score:
-            if overtime_shootout in ['OT', 'SO']:
-                return 0.6, f'HOME_WIN_{overtime_shootout}'  # OT/SO výhra méně cenná
-            else:
-                return 1.0, 'HOME_WIN_REG'  # Regulérní výhra
-        elif away_score > home_score:
-            if overtime_shootout in ['OT', 'SO']:
-                return 0.4, f'AWAY_WIN_{overtime_shootout}'  # OT/SO porážka dostane body
-            else:
-                return 0.0, 'AWAY_WIN_REG'  # Regulérní porážka
-        else:
-            return 0.5, 'TIE'  # Nemělo by se stát v moderní NHL
+        return _game_result_to_score(home_score, away_score, overtime_shootout)
     
     def load_historical_games(self, season_start: str = '2022', season_end: str = '2024') -> pd.DataFrame:
         """
@@ -262,8 +146,8 @@ class EloRatingSystem:
         Returns:
             DataFrame s výsledky zápasů pro trénování
         """
-        query = f"""
-        SELECT 
+        query = text("""
+        SELECT
             g.id,
             g.date,
             g.datetime_et,
@@ -273,36 +157,36 @@ class EloRatingSystem:
             g.home_score,
             g.away_score,
             g.overtime_shootout,
-            
+
             -- Domácí tým s franchise info
             ht.name as home_team_name,
             hf.franchise_name as home_franchise_name,
-            
-            -- Hostující tým s franchise info  
+
+            -- Hostující tým s franchise info
             at.name as away_team_name,
             af.franchise_name as away_franchise_name
-            
+
         FROM games g
         JOIN teams ht ON g.home_team_id = ht.id
         JOIN franchises hf ON ht.franchise_id = hf.id
-        JOIN teams at ON g.away_team_id = at.id  
+        JOIN teams at ON g.away_team_id = at.id
         JOIN franchises af ON at.franchise_id = af.id
-        
+
         WHERE g.status = 'completed'
-            AND g.season >= '{season_start}'
-            AND g.season <= '{season_end}'  -- KRITICKÉ: Excluded 2024/25 from training!
-            AND g.home_score IS NOT NULL 
+            AND g.season >= :season_start
+            AND g.season <= :season_end
+            AND g.home_score IS NOT NULL
             AND g.away_score IS NOT NULL
         ORDER BY g.date, g.id
-        """
-        
-        # === MIGRACE: Safe database query s performance monitoring ===
+        """)
+
         try:
             self.perf_logger.start_timer('load_historical_games')
-            
+
             df = self.db_manager.execute_query_safe(
-                query, 
-                f"Loading historical games ({season_start}-{season_end})"
+                query,
+                f"Loading historical games ({season_start}-{season_end})",
+                params={"season_start": season_start, "season_end": season_end}
             )
             
             self.perf_logger.end_timer('load_historical_games')
@@ -453,21 +337,17 @@ class EloRatingSystem:
             raise
     
     def _apply_season_regression(self):
-        """Aplikuje regresi k průměru mezi sezónami"""
+        """
+        Aplikuje regresi k průměru mezi sezónami.
+        Delegates to pure function in elo_calculations.py.
+        """
         if not self.team_ratings:
             logger.warning("No team ratings to apply regression to")
             return
-            
-        mean_rating = np.mean(list(self.team_ratings.values()))
-        regressed_count = 0
-        
-        for team_id in self.team_ratings:
-            current_rating = self.team_ratings[team_id]
-            regressed_rating = current_rating + self.season_regression * (mean_rating - current_rating)
-            self.team_ratings[team_id] = regressed_rating
-            regressed_count += 1
-        
-        logger.debug(f"Applied season regression to {regressed_count} teams (mean: {mean_rating:.1f})")
+
+        # Použij pure funkci pro výpočet regrese
+        self.team_ratings = apply_season_regression(self.team_ratings, self.season_regression)
+        logger.debug(f"Applied season regression to {len(self.team_ratings)} teams")
     
     def predict_game(self, home_team_id: int, away_team_id: int) -> Dict:
         """
@@ -524,39 +404,40 @@ class EloRatingSystem:
         Returns:
             Seznam prediction dictionary
         """
-        query = f"""
-        SELECT 
+        query = text("""
+        SELECT
             g.id,
             g.date,
             g.datetime_et,
             g.home_team_id,
             g.away_team_id,
-            
+
             -- Aktuální jména týmů (is_current = TRUE)
             ht.name as home_team_name,
             at.name as away_team_name,
-            
+
             -- Franchise info pro kontext
             hf.franchise_name as home_franchise,
             af.franchise_name as away_franchise
-            
+
         FROM games g
         JOIN teams ht ON g.home_team_id = ht.id AND ht.is_current = TRUE
         JOIN franchises hf ON ht.franchise_id = hf.id
         JOIN teams at ON g.away_team_id = at.id AND at.is_current = TRUE
         JOIN franchises af ON at.franchise_id = af.id
-        
+
         WHERE g.status = 'scheduled'
-            AND g.date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '{days_ahead} days'
+            AND g.date BETWEEN CURRENT_DATE AND CURRENT_DATE + CAST(:days_ahead || ' days' AS INTERVAL)
         ORDER BY g.date, g.datetime_et
-        """
-        
+        """)
+
         try:
             self.perf_logger.start_timer('predict_upcoming_games')
-            
+
             upcoming_games = self.db_manager.execute_query_safe(
-                query, 
-                f"Loading upcoming games ({days_ahead} days ahead)"
+                query,
+                f"Loading upcoming games ({days_ahead} days ahead)",
+                params={"days_ahead": str(int(days_ahead))}
             )
             
             predictions = []
@@ -647,38 +528,39 @@ class EloRatingSystem:
                 return {}
             
             logger.debug(f"Validní team ID: {valid_team_ids[:5]}...")
-            
-            # Jednoduchý dotaz - získej aktuální týmy
-            if len(valid_team_ids) == 1:
-                query = f"""
+
+            # Parametrizovaný dotaz s dynamickými placeholdery pro IN clause
+            placeholders = ', '.join(f':id_{i}' for i in range(len(valid_team_ids)))
+            params = {f'id_{i}': tid for i, tid in enumerate(valid_team_ids)}
+
+            query = text(f"""
                 SELECT t.id, t.name, f.franchise_name
                 FROM teams t
                 JOIN franchises f ON t.franchise_id = f.id
-                WHERE t.id = {valid_team_ids[0]} AND t.is_current = TRUE
-                """
-            else:
-                team_ids_str = ','.join(map(str, valid_team_ids))
-                query = f"""
-                SELECT t.id, t.name, f.franchise_name
-                FROM teams t
-                JOIN franchises f ON t.franchise_id = f.id
-                WHERE t.id IN ({team_ids_str}) AND t.is_current = TRUE
-                """
-            
+                WHERE t.id IN ({placeholders}) AND t.is_current = TRUE
+            """)
+
             logger.debug("Provádění SQL dotazu...")
             df = self.db_manager.execute_query_safe(
-                query, 
-                f"Getting team names for {len(valid_team_ids)} teams"
+                query,
+                f"Getting team names for {len(valid_team_ids)} teams",
+                params=params
             )
             logger.debug(f"Dotaz vrátil {len(df)} řádků")
-            
+
             if df.empty:
                 logger.warning("Dotaz nevrátil žádné výsledky - týmy možná nejsou aktuální")
                 # Zkus bez is_current filtru
-                query_fallback = query.replace(" AND t.is_current = TRUE", "")
+                query_fallback = text(f"""
+                    SELECT t.id, t.name, f.franchise_name
+                    FROM teams t
+                    JOIN franchises f ON t.franchise_id = f.id
+                    WHERE t.id IN ({placeholders})
+                """)
                 df = self.db_manager.execute_query_safe(
                     query_fallback,
-                    "Getting team names (fallback without is_current filter)"
+                    "Getting team names (fallback without is_current filter)",
+                    params=params
                 )
                 logger.debug(f"Fallback dotaz vrátil {len(df)} řádků")
             
@@ -743,8 +625,8 @@ class EloRatingSystem:
         Returns:
             DataFrame se zápasy pro backtesting (včetně naplánovaných zápasů)
         """
-        query = f"""
-        SELECT 
+        query = text("""
+        SELECT
             g.id,
             g.date,
             g.datetime_et,
@@ -755,32 +637,33 @@ class EloRatingSystem:
             g.away_score,
             g.overtime_shootout,
             g.status,
-            
+
             -- Aktuální jména týmů (z franchise perspektivy)
             ht.name as home_team_name,
             hf.franchise_name as home_franchise_name,
-            
-            -- Hostující tým s franchise info  
+
+            -- Hostující tým s franchise info
             at.name as away_team_name,
             af.franchise_name as away_franchise_name
-            
+
         FROM games g
         JOIN teams ht ON g.home_team_id = ht.id
         JOIN franchises hf ON ht.franchise_id = hf.id
-        JOIN teams at ON g.away_team_id = at.id  
+        JOIN teams at ON g.away_team_id = at.id
         JOIN franchises af ON at.franchise_id = af.id
-        
-        WHERE g.season = '{season}'
+
+        WHERE g.season = :season
             -- Zahrnout dokončené I naplánované zápasy pro backtesting
         ORDER BY g.date, g.datetime_et, g.id
-        """
-        
+        """)
+
         try:
             self.perf_logger.start_timer('load_backtesting_games')
-            
+
             df = self.db_manager.execute_query_safe(
                 query,
-                f"Loading backtesting games (season {season})"
+                f"Loading backtesting games (season {season})",
+                params={"season": season}
             )
             
             self.perf_logger.end_timer('load_backtesting_games')

@@ -1,25 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Hockey Performance Analyzer - ENHANCED MIGRATION
+Hockey Performance Analyzer (REFACTORED)
+=========================================
 Comprehensive analysis of backtesting results with quarterly breakdown,
-risk assessment, strategy comparison, and statistical validation
+risk assessment, strategy comparison, and statistical validation.
 
-MIGRATED TO ENHANCED INFRASTRUCTURE:
-- Per-component logging (betting.log)
-- Centralized paths via PATHS system
-- Safe file handling with automatic encoding detection
-- Performance monitoring for long operations
-- Robust error handling with detailed logging
-
-Features:
-- Quarterly performance breakdown for robustness validation
-- Statistical significance testing
-- Risk metrics and drawdown analysis
-- Strategy comparison across multiple configurations
-- Model performance validation (predictions vs betting results)
-- Time-based performance analysis
-- Comprehensive reporting and export
+REFACTORING: SRP-based refactoring
+- Statistical tests moved to src/betting/statistical_tests.py
+- Risk metrics moved to src/betting/risk_metrics.py
+- PerformanceAnalyzer now acts as orchestrator
 
 Location: src/betting/performance_analyzer.py
 """
@@ -29,10 +19,9 @@ import numpy as np
 import glob
 from datetime import datetime, date
 from typing import Dict, List, Tuple, Any, Optional, Union
-from scipy import stats
 import warnings
 
-# === MIGRACE: Enhanced Infrastructure Imports ===
+# === Enhanced Infrastructure Imports ===
 from config.paths import PATHS
 from config.logging_config import get_component_logger, setup_logging, PerformanceLogger
 from src.utils.file_handlers import (
@@ -40,11 +29,29 @@ from src.utils.file_handlers import (
     FileHandler
 )
 
+# === REFACTORING: Import statistical tests and risk metrics ===
+from src.betting.statistical_tests import (
+    perform_quarterly_statistical_tests,
+    calculate_roi_confidence_interval,
+    test_strategy_difference,
+    test_randomness
+)
+from src.betting.risk_metrics import (
+    calculate_var_metrics,
+    calculate_drawdown_metrics,
+    calculate_recovery_periods,
+    calculate_max_consecutive,
+    calculate_streak_analysis,
+    calculate_conditional_probability,
+    calculate_stake_analysis,
+    calculate_odds_analysis,
+    calculate_monthly_risk
+)
+
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore')
 
-# === MIGRACE: Enhanced Logging Setup ===
-# Component-specific logger pro betting operations
+# === Component-specific logger ===
 logger = get_component_logger(__name__, 'betting')
 
 
@@ -355,54 +362,15 @@ class PerformanceAnalyzer:
             raise
     
     def _perform_quarterly_statistical_tests(self, quarterly_df: pd.DataFrame) -> Dict[str, Any]:
-        """Perform statistical tests on quarterly performance - ENHANCED"""
-        
-        tests = {}
-        
-        if len(quarterly_df) < 2:
-            return {'note': 'Insufficient quarters for statistical testing'}
-        
+        """
+        Perform statistical tests on quarterly performance.
+        Delegates to statistical_tests module.
+        """
         try:
-            # Test for consistency (one-sample t-test against zero)
-            roi_values = quarterly_df['roi'].values
-            if len(roi_values) > 1:
-                t_stat, p_value = stats.ttest_1samp(roi_values, 0)
-                tests['roi_significance'] = {
-                    'test': 'one_sample_t_test',
-                    'null_hypothesis': 'quarterly ROI = 0',
-                    't_statistic': t_stat,
-                    'p_value': p_value,
-                    'significant_at_5pct': p_value < 0.05,
-                    'interpretation': 'Significantly different from zero' if p_value < 0.05 else 'Not significantly different from zero'
-                }
-            
-            # Test for normality of returns
-            if len(roi_values) >= 3:
-                shapiro_stat, shapiro_p = stats.shapiro(roi_values)
-                tests['normality_test'] = {
-                    'test': 'shapiro_wilk',
-                    'statistic': shapiro_stat,
-                    'p_value': shapiro_p,
-                    'normally_distributed': shapiro_p > 0.05
-                }
-            
-            # Test for trend (correlation with time)
-            if len(roi_values) >= 3:
-                time_index = range(len(roi_values))
-                correlation, corr_p = stats.pearsonr(time_index, roi_values)
-                tests['trend_analysis'] = {
-                    'test': 'pearson_correlation',
-                    'correlation': correlation,
-                    'p_value': corr_p,
-                    'significant_trend': corr_p < 0.05,
-                    'trend_direction': 'improving' if correlation > 0 else 'declining' if correlation < 0 else 'stable'
-                }
-            
+            return perform_quarterly_statistical_tests(quarterly_df)
         except Exception as e:
             logger.warning(f"Statistical tests partially failed: {e}")
-            tests['error'] = str(e)
-        
-        return tests
+            return {'error': str(e)}
     
     def analyze_strategy_comparison(self, 
                                   optimization_results: Union[str, Dict, List[str]],
@@ -557,223 +525,94 @@ class PerformanceAnalyzer:
     
     def analyze_risk_metrics(self, results: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Comprehensive risk analysis of backtesting results - ENHANCED
-        
-        Args:
-            results: Backtesting results dictionary
-            
-        Returns:
-            Risk analysis results
-            
-        ENHANCED FEATURES:
-        - Performance timing
-        - Better error handling
-        - Enhanced risk calculations
+        Comprehensive risk analysis of backtesting results.
+        Delegates calculations to risk_metrics module.
         """
         self.perf_logger.start_timer('risk_analysis')
         logger.info("⚠️ Analyzing comprehensive risk metrics...")
-        
+
         if not results.get('bet_history'):
             error_msg = 'No bet history found in results'
             logger.error(error_msg)
             return {'error': error_msg}
-        
+
         try:
             bet_df = pd.DataFrame(results['bet_history'])
             bet_df['date'] = pd.to_datetime(bet_df['date'])
-            
+
             # Daily P&L calculation
             daily_pnl = bet_df.groupby(bet_df['date'].dt.date).agg({
                 'net_result': 'sum',
                 'stake': 'sum',
                 'payout': 'sum'
             }).reset_index()
-            
+
             daily_pnl['cumulative_pnl'] = daily_pnl['net_result'].cumsum()
             daily_pnl['daily_roi'] = daily_pnl['net_result'] / daily_pnl['stake']
-            
-            # Drawdown analysis
-            running_max = daily_pnl['cumulative_pnl'].cummax()
-            drawdown = daily_pnl['cumulative_pnl'] - running_max
-            drawdown_pct = drawdown / abs(running_max).replace(0, 1)
-            
-            # Value at Risk (VaR) calculations
-            daily_returns = daily_pnl['daily_roi'].dropna()
-            if len(daily_returns) > 0:
-                var_95 = np.percentile(daily_returns, 5)  # 5th percentile (95% VaR)
-                var_99 = np.percentile(daily_returns, 1)  # 1st percentile (99% VaR)
-                
-                # Expected Shortfall (Conditional VaR)
-                es_95 = daily_returns[daily_returns <= var_95].mean()
-                es_99 = daily_returns[daily_returns <= var_99].mean()
-            else:
-                var_95 = var_99 = es_95 = es_99 = 0
-            
-            # Longest losing streak
-            bet_df['bet_won_clean'] = bet_df['bet_won'].fillna(False)  # Handle NaN values
-            bet_df['loss_streak'] = (~bet_df['bet_won_clean']).astype(int)
-            bet_df['streak_id'] = (bet_df['bet_won_clean'] != bet_df['bet_won_clean'].shift()).cumsum()
-            losing_streaks = bet_df[~bet_df['bet_won_clean']].groupby('streak_id').size()
-            max_losing_streak = losing_streaks.max() if len(losing_streaks) > 0 else 0
-            
-            # Bet size analysis
-            stake_analysis = {
-                'min_stake': bet_df['stake'].min(),
-                'max_stake': bet_df['stake'].max(),
-                'avg_stake': bet_df['stake'].mean(),
-                'median_stake': bet_df['stake'].median(),
-                'stake_std': bet_df['stake'].std(),
-                'stake_concentration': (bet_df['stake'] > bet_df['stake'].quantile(0.9)).sum() / len(bet_df)
-            }
-            
-            # Odds distribution analysis
-            odds_analysis = {
-                'min_odds': bet_df['odds'].min(),
-                'max_odds': bet_df['odds'].max(),
-                'avg_odds': bet_df['odds'].mean(),
-                'median_odds': bet_df['odds'].median(),
-                'low_odds_bets': (bet_df['odds'] < 1.5).sum() / len(bet_df),
-                'high_odds_bets': (bet_df['odds'] > 2.5).sum() / len(bet_df)
-            }
-            
+
+            # Use risk_metrics module functions
+            var_metrics = calculate_var_metrics(daily_pnl['daily_roi'])
+            drawdown_metrics = calculate_drawdown_metrics(daily_pnl['cumulative_pnl'])
+            streak_analysis = calculate_streak_analysis(bet_df['bet_won'])
+            stake_analysis_result = calculate_stake_analysis(bet_df['stake'])
+            odds_analysis_result = calculate_odds_analysis(bet_df['odds'])
+            monthly_risk = calculate_monthly_risk(bet_df)
+
             # Win/loss pattern analysis
             win_loss_patterns = {
-                'consecutive_wins_max': self._calculate_max_consecutive(bet_df['bet_won_clean']),
-                'consecutive_losses_max': self._calculate_max_consecutive(~bet_df['bet_won_clean']),
-                'win_after_loss_rate': self._calculate_conditional_probability(bet_df, 'loss_then_win'),
-                'loss_after_win_rate': self._calculate_conditional_probability(bet_df, 'win_then_loss')
+                'consecutive_wins_max': streak_analysis['consecutive_wins_max'],
+                'consecutive_losses_max': streak_analysis['consecutive_losses_max'],
+                'win_after_loss_rate': calculate_conditional_probability(bet_df['bet_won'], 'loss_then_win'),
+                'loss_after_win_rate': calculate_conditional_probability(bet_df['bet_won'], 'win_then_loss')
             }
-            
-            # Monthly risk metrics
-            monthly_risk = {}
-            if len(bet_df) > 30:  # At least a month of data
-                bet_df['month'] = bet_df['date'].dt.to_period('M')
-                monthly_pnl = bet_df.groupby('month')['net_result'].sum()
-                
-                monthly_risk = {
-                    'monthly_volatility': monthly_pnl.std(),
-                    'worst_month': monthly_pnl.min(),
-                    'best_month': monthly_pnl.max(),
-                    'negative_months': (monthly_pnl < 0).sum(),
-                    'total_months': len(monthly_pnl)
-                }
-            
+
             risk_analysis = {
-                'drawdown_metrics': {
-                    'max_drawdown_absolute': abs(drawdown.min()),
-                    'max_drawdown_percent': abs(drawdown_pct.min()),
-                    'current_drawdown': drawdown.iloc[-1] if len(drawdown) > 0 else 0,
-                    'drawdown_periods': (drawdown < 0).sum(),
-                    'recovery_periods': self._calculate_recovery_periods(drawdown)
-                },
-                'var_metrics': {
-                    'var_95_daily': var_95,
-                    'var_99_daily': var_99,
-                    'expected_shortfall_95': es_95,
-                    'expected_shortfall_99': es_99
-                },
+                'drawdown_metrics': drawdown_metrics,
+                'var_metrics': var_metrics,
                 'streak_analysis': {
-                    'max_losing_streak': max_losing_streak,
-                    'avg_losing_streak': losing_streaks.mean() if len(losing_streaks) > 0 else 0,
+                    'max_losing_streak': streak_analysis['max_losing_streak'],
+                    'avg_losing_streak': streak_analysis['avg_losing_streak'],
                     'win_loss_patterns': win_loss_patterns
                 },
-                'stake_analysis': stake_analysis,
-                'odds_analysis': odds_analysis,
+                'stake_analysis': stake_analysis_result,
+                'odds_analysis': odds_analysis_result,
                 'monthly_risk': monthly_risk,
                 'analysis_date': datetime.now().isoformat()
             }
-            
+
             logger.info("✅ Risk analysis completed:")
-            logger.info(f"   Max drawdown: {abs(drawdown_pct.min()):.2%}")
-            logger.info(f"   VaR (95%): {var_95:+.2%}")
-            logger.info(f"   Max losing streak: {max_losing_streak}")
-            
+            logger.info(f"   Max drawdown: {drawdown_metrics['max_drawdown_percent']:.2%}")
+            logger.info(f"   VaR (95%): {var_metrics['var_95_daily']:+.2%}")
+            logger.info(f"   Max losing streak: {streak_analysis['max_losing_streak']}")
+
             self.perf_logger.end_timer('risk_analysis')
             return risk_analysis
-            
+
         except Exception as e:
             logger.error(f"Risk analysis failed: {e}")
             self.perf_logger.end_timer('risk_analysis')
             raise
     
     def _calculate_max_consecutive(self, series: pd.Series) -> int:
-        """Calculate maximum consecutive True values in a boolean series"""
-        if len(series) == 0:
-            return 0
-        
-        max_consecutive = 0
-        current_consecutive = 0
-        
-        for value in series:
-            if value:
-                current_consecutive += 1
-                max_consecutive = max(max_consecutive, current_consecutive)
-            else:
-                current_consecutive = 0
-        
-        return max_consecutive
-    
+        """
+        Calculate maximum consecutive True values.
+        Delegates to risk_metrics module.
+        """
+        return calculate_max_consecutive(series)
+
     def _calculate_conditional_probability(self, bet_df: pd.DataFrame, pattern: str) -> float:
-        """Calculate conditional probabilities for win/loss patterns"""
-        if len(bet_df) < 2:
-            return 0.0
-        
-        # Use cleaned boolean column
-        bet_won_clean = bet_df['bet_won'].fillna(False)
-        
-        if pattern == 'loss_then_win':
-            # P(Win | Previous Loss)
-            prev_loss = ~bet_won_clean.shift(1)
-            current_win = bet_won_clean
-            valid_mask = prev_loss.notna()
-            
-            if valid_mask.sum() == 0:
-                return 0.0
-            
-            return (prev_loss & current_win & valid_mask).sum() / (prev_loss & valid_mask).sum()
-        
-        elif pattern == 'win_then_loss':
-            # P(Loss | Previous Win)
-            prev_win = bet_won_clean.shift(1)
-            current_loss = ~bet_won_clean
-            valid_mask = prev_win.notna()
-            
-            if valid_mask.sum() == 0:
-                return 0.0
-            
-            return (prev_win & current_loss & valid_mask).sum() / (prev_win & valid_mask).sum()
-        
-        return 0.0
-    
+        """
+        Calculate conditional probabilities for win/loss patterns.
+        Delegates to risk_metrics module.
+        """
+        return calculate_conditional_probability(bet_df['bet_won'], pattern)
+
     def _calculate_recovery_periods(self, drawdown: pd.Series) -> Dict[str, float]:
-        """Calculate drawdown recovery statistics"""
-        if len(drawdown) == 0:
-            return {'avg_recovery_days': 0, 'max_recovery_days': 0}
-        
-        # Find drawdown periods
-        in_drawdown = drawdown < 0
-        drawdown_periods = []
-        
-        start_idx = None
-        for i, is_dd in enumerate(in_drawdown):
-            if is_dd and start_idx is None:
-                start_idx = i
-            elif not is_dd and start_idx is not None:
-                drawdown_periods.append(i - start_idx)
-                start_idx = None
-        
-        # Handle case where we end in drawdown
-        if start_idx is not None:
-            drawdown_periods.append(len(drawdown) - start_idx)
-        
-        if drawdown_periods:
-            return {
-                'avg_recovery_days': np.mean(drawdown_periods),
-                'max_recovery_days': max(drawdown_periods),
-                'total_drawdown_periods': len(drawdown_periods)
-            }
-        else:
-            return {'avg_recovery_days': 0, 'max_recovery_days': 0, 'total_drawdown_periods': 0}
+        """
+        Calculate drawdown recovery statistics.
+        Delegates to risk_metrics module.
+        """
+        return calculate_recovery_periods(drawdown)
     
     def analyze_model_performance(self, results: Dict[str, Any]) -> Dict[str, Any]:
         """
